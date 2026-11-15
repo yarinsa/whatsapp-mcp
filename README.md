@@ -207,7 +207,8 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_message**: Send a WhatsApp message to a specified phone number or group JID
 - **send_file**: Send a file (image, video, raw audio, document) to a specified recipient
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
-- **mark_chat_read**: Mark a chat as read (sends read receipts and clears the unread badge on your phone)
+- **mark_direct_chats_read**: Mark one or more 1:1 chats as read (read receipts + clears the unread badge on your phone)
+- **mark_group_chats_read**: Mark one or more groups/communities as read. Separate from DMs so you can always-allow one and approve the other each time
 - **mark_chat_unread**: Mark a chat as unread on all your devices
 - **download_media**: Download media from a WhatsApp message and get the local file path
 

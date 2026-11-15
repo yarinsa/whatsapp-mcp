@@ -371,17 +371,50 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "message": "Failed to download media"
         }
 
+def _is_group(jid: str) -> bool:
+    # Groups and communities (a community's announcement group is also @g.us).
+    return jid.endswith("@g.us")
+
+
+def _mark_many_read(chat_jids: List[str], want_groups: bool) -> Dict[str, Any]:
+    kind = "group/community" if want_groups else "direct"
+    results = []
+    for jid in dict.fromkeys(chat_jids):  # dedupe, keep order
+        if _is_group(jid) != want_groups:
+            results.append({"chat_jid": jid, "success": False,
+                            "message": f"Not a {kind} chat; use mark_{'direct' if want_groups else 'group'}_chats_read"})
+            continue
+        ok, msg = whatsapp_mark_chat(jid, read=True)
+        results.append({"chat_jid": jid, "success": ok, "message": msg})
+    done = sum(r["success"] for r in results)
+    return {"success": done == len(results), "marked": done, "failed": len(results) - done, "results": results}
+
+
 @mcp.tool()
 @needs_bridge
-def mark_chat_read(chat_jid: str) -> Dict[str, Any]:
-    """Mark a WhatsApp chat as read: sends read receipts (blue ticks) for its unread
-    incoming messages and clears the unread badge on your phone and other devices.
+def mark_direct_chats_read(chat_jids: List[str]) -> Dict[str, Any]:
+    """Mark one or more direct (1:1) WhatsApp chats as read. The other person sees
+    blue ticks, and the unread badge clears on your phone and other devices.
+    Group or community JIDs are refused; use mark_group_chats_read for those.
+    Receipts go only to messages stored on this server; the badge clears either way.
 
     Args:
-        chat_jid: The JID of the chat (from list_chats), e.g. "123456789@lid" or "123@g.us"
+        chat_jids: JIDs of direct chats (from list_chats), e.g. ["972501234567@s.whatsapp.net", "123456789@lid"]
     """
-    success, message = whatsapp_mark_chat(chat_jid, read=True)
-    return {"success": success, "message": message}
+    return _mark_many_read(chat_jids, want_groups=False)
+
+
+@mcp.tool()
+@needs_bridge
+def mark_group_chats_read(chat_jids: List[str]) -> Dict[str, Any]:
+    """Mark one or more WhatsApp groups or communities as read. Members may see your
+    read receipt, and the unread badge clears on your phone and other devices.
+    Direct-chat JIDs are refused; use mark_direct_chats_read for those.
+
+    Args:
+        chat_jids: JIDs of groups/communities (from list_chats), e.g. ["120363000000000000@g.us"]
+    """
+    return _mark_many_read(chat_jids, want_groups=True)
 
 
 @mcp.tool()

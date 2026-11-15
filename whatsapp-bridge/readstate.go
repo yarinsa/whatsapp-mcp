@@ -137,29 +137,33 @@ func (rs *ReadState) MarkRead(ctx context.Context, chatJID string, read bool) (s
 	if err != nil {
 		return "", fmt.Errorf("invalid chat JID: %v", err)
 	}
-	var unread int
-	if err := rs.db.QueryRow(`SELECT unread_count FROM chats WHERE jid = ?`, chatJID).Scan(&unread); err != nil {
+	var lastTime sql.NullTime
+	if err := rs.db.QueryRow(`SELECT last_message_time FROM chats WHERE jid = ?`, chatJID).Scan(&lastTime); err != nil {
 		return "", fmt.Errorf("unknown chat %s", chatJID)
 	}
 	msgs, err := rs.recentMessages(chatJID, 100)
 	if err != nil {
 		return "", err
 	}
-	if len(msgs) == 0 {
-		return "", fmt.Errorf("no stored messages in %s", chatJID)
-	}
 
-	// Message key of the newest message anchors the app-state range.
-	last := msgs[0]
-	key := &waCommon.MessageKey{RemoteJID: proto.String(chatJID), FromMe: proto.Bool(last.fromMe), ID: proto.String(last.id)}
-	if chat.Server == types.GroupServer && !last.fromMe {
-		if s := senderJID(names.storeLookups(ctx), last.sender); !s.IsEmpty() {
-			key.Participant = proto.String(s.String())
+	// The newest stored message anchors the app-state range. A chat with no
+	// stored messages (history not synced to this device) still gets a
+	// range by timestamp, which is enough for WhatsApp to clear the badge.
+	ts := lastTime.Time
+	var key *waCommon.MessageKey
+	if len(msgs) > 0 {
+		last := msgs[0]
+		ts = last.ts
+		key = &waCommon.MessageKey{RemoteJID: proto.String(chatJID), FromMe: proto.Bool(last.fromMe), ID: proto.String(last.id)}
+		if chat.Server == types.GroupServer && !last.fromMe {
+			if s := senderJID(names.storeLookups(ctx), last.sender); !s.IsEmpty() {
+				key.Participant = proto.String(s.String())
+			}
 		}
 	}
 
 	if !read {
-		if err := rs.client.SendAppState(ctx, appstate.BuildMarkChatAsRead(chat, false, last.ts, key)); err != nil {
+		if err := rs.syncReadState(ctx, chat, false, ts, key); err != nil {
 			return "", fmt.Errorf("mark unread: %w", err)
 		}
 		rs.db.Exec(`UPDATE chats SET marked_unread = 1 WHERE jid = ?`, chatJID)
@@ -189,11 +193,44 @@ func (rs *ReadState) MarkRead(ctx context.Context, chatJID string, read bool) (s
 			return "", fmt.Errorf("send read receipts: %w", err)
 		}
 	}
-	if err := rs.client.SendAppState(ctx, appstate.BuildMarkChatAsRead(chat, true, last.ts, key)); err != nil {
-		rs.log.Warnf("Read receipts sent but syncing read state failed for %s: %v", chatJID, err)
+	if err := rs.syncReadState(ctx, chat, true, ts, key); err != nil {
+		rs.log.Errorf("Syncing read state failed for %s: %v", chatJID, err)
+		return "", fmt.Errorf("sent read receipts for %d messages, but clearing the unread badge failed: %w", count, err)
 	}
 	rs.setRead(chatJID)
-	return fmt.Sprintf("Marked as read (%d messages)", count), nil
+	return fmt.Sprintf("Marked as read on all devices (read receipts sent for %d stored messages)", count), nil
+}
+
+// syncReadState sends the mark-read/unread app-state mutation that clears or
+// sets the unread badge on your other devices. WhatsApp keys 1:1 chats by
+// either phone number or LID, so the mutation goes to both forms.
+func (rs *ReadState) syncReadState(ctx context.Context, chat types.JID, read bool, ts time.Time, key *waCommon.MessageKey) error {
+	targets := []types.JID{chat}
+	lids := rs.client.Store.LIDs
+	switch chat.Server {
+	case types.DefaultUserServer:
+		if alt, err := lids.GetLIDForPN(ctx, chat); err == nil && !alt.IsEmpty() {
+			targets = append(targets, alt)
+		}
+	case types.HiddenUserServer:
+		if alt, err := lids.GetPNForLID(ctx, chat); err == nil && !alt.IsEmpty() {
+			targets = append(targets, alt)
+		}
+	}
+	for i, t := range targets {
+		k := key
+		if k != nil && i > 0 {
+			k = proto.Clone(key).(*waCommon.MessageKey)
+			k.RemoteJID = proto.String(t.String())
+		}
+		if err := rs.client.SendAppState(ctx, appstate.BuildMarkChatAsRead(t, read, ts, k)); err != nil {
+			if i == 0 {
+				return err
+			}
+			rs.log.Warnf("Read-state sync for alternate JID %s failed: %v", t, err)
+		}
+	}
+	return nil
 }
 
 func (rs *ReadState) registerHandler() {
