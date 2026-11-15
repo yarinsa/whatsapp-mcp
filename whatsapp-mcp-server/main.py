@@ -283,6 +283,16 @@ def get_message_context(
     context = whatsapp_get_message_context(message_id, before, after, chat_jid)
     return context
 
+def _with_mark_read(jid: str, success: bool, status_message: str, mark_read: bool) -> Dict[str, Any]:
+    """Build a send result, marking the chat read afterwards when asked and the send worked."""
+    result: Dict[str, Any] = {"success": success, "message": status_message}
+    if success and mark_read:
+        read_ok, read_msg = whatsapp_mark_chat(jid, True)
+        result["marked_read"] = read_ok
+        if not read_ok:
+            result["mark_read_error"] = read_msg
+    return result
+
 @mcp.tool()
 @needs_bridge
 def send_message(recipient: str, message: str, mark_read: bool = False) -> Dict[str, Any]:
@@ -304,17 +314,11 @@ def send_message(recipient: str, message: str, mark_read: bool = False) -> Dict[
     if err:
         return {"success": False, "message": err}
     success, status_message = whatsapp_send_message(jid, message)
-    result: Dict[str, Any] = {"success": success, "message": status_message}
-    if success and mark_read:
-        read_ok, read_msg = whatsapp_mark_chat(jid, True)
-        result["marked_read"] = read_ok
-        if not read_ok:
-            result["mark_read_error"] = read_msg
-    return result
+    return _with_mark_read(jid, success, status_message, mark_read)
 
 @mcp.tool()
 @needs_bridge
-def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
+def send_file(recipient: str, media_path: str, mark_read: bool = False) -> Dict[str, Any]:
     """Send a file (picture, video, document or raw audio) to a person or group.
 
     Args:
@@ -324,16 +328,17 @@ def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
             "Name (972501234567)". The user reviews this before approving, and a name
             that does not match the chat is refused.
         media_path: Absolute path to the file to send
+        mark_read: Also mark the chat read (sending read receipts) after it is sent
     """
     jid, err = _resolve_chat(recipient)
     if err:
         return {"success": False, "message": err}
     success, status_message = whatsapp_send_file(jid, media_path)
-    return {"success": success, "message": status_message}
+    return _with_mark_read(jid, success, status_message, mark_read)
 
 @mcp.tool()
 @needs_bridge
-def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
+def send_audio_message(recipient: str, media_path: str, mark_read: bool = False) -> Dict[str, Any]:
     """Send an audio file as a WhatsApp voice message. If it fails because ffmpeg
     is missing, use send_file instead.
 
@@ -344,12 +349,13 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
             "Name (972501234567)". The user reviews this before approving, and a name
             that does not match the chat is refused.
         media_path: Absolute path to the audio file (converted to Opus .ogg if needed)
+        mark_read: Also mark the chat read (sending read receipts) after it is sent
     """
     jid, err = _resolve_chat(recipient)
     if err:
         return {"success": False, "message": err}
     success, status_message = whatsapp_audio_voice_message(jid, media_path)
-    return {"success": success, "message": status_message}
+    return _with_mark_read(jid, success, status_message, mark_read)
 
 @mcp.tool()
 @needs_bridge
