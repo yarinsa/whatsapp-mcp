@@ -285,8 +285,11 @@ def get_message_context(
 
 @mcp.tool()
 @needs_bridge
-def send_message(recipient: str, message: str) -> Dict[str, Any]:
+def send_message(recipient: str, message: str, mark_read: bool = False) -> Dict[str, Any]:
     """Send a WhatsApp text message to a person or group.
+
+    When replying to unread messages, pass mark_read=True to also mark the chat
+    read in the same call, instead of calling a mark-read tool afterwards.
 
     Args:
         recipient: Who gets it, as "Name (jid)" with the exact name and JID from list_chats
@@ -295,12 +298,19 @@ def send_message(recipient: str, message: str) -> Dict[str, Any]:
             "Name (972501234567)". The user reviews this before approving, and a name
             that does not match the chat is refused.
         message: The message text to send
+        mark_read: Also mark the chat read (sending read receipts) after the message is sent
     """
     jid, err = _resolve_chat(recipient)
     if err:
         return {"success": False, "message": err}
     success, status_message = whatsapp_send_message(jid, message)
-    return {"success": success, "message": status_message}
+    result: Dict[str, Any] = {"success": success, "message": status_message}
+    if success and mark_read:
+        read_ok, read_msg = whatsapp_mark_chat(jid, True)
+        result["marked_read"] = read_ok
+        if not read_ok:
+            result["mark_read_error"] = read_msg
+    return result
 
 @mcp.tool()
 @needs_bridge
