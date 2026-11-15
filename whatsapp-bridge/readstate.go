@@ -126,24 +126,18 @@ func senderJID(l lookups, s string) types.JID {
 	return types.JID{}
 }
 
-// MarkRead sends read receipts for the chat's unread incoming messages and
-// syncs the read state to your other devices. With read=false it marks the
-// chat unread instead (no receipts are withdrawn: WhatsApp can't do that).
-func (rs *ReadState) MarkRead(ctx context.Context, chatJID string, read bool) (string, error) {
-	if !rs.client.IsConnected() {
-		return "", fmt.Errorf("not connected to WhatsApp")
-	}
-	chat, err := types.ParseJID(chatJID)
-	if err != nil {
-		return "", fmt.Errorf("invalid chat JID: %v", err)
-	}
+// anchor returns the newest stored message's timestamp and key, which
+// app-state mutations (read, archive, delete) use to bound the chat range,
+// plus up to 100 recent stored messages.
+func (rs *ReadState) anchor(ctx context.Context, chat types.JID) (time.Time, *waCommon.MessageKey, []storedMsg, error) {
+	chatJID := chat.String()
 	var lastTime sql.NullTime
 	if err := rs.db.QueryRow(`SELECT last_message_time FROM chats WHERE jid = ?`, chatJID).Scan(&lastTime); err != nil {
-		return "", fmt.Errorf("unknown chat %s", chatJID)
+		return time.Time{}, nil, nil, fmt.Errorf("unknown chat %s", chatJID)
 	}
 	msgs, err := rs.recentMessages(chatJID, 100)
 	if err != nil {
-		return "", err
+		return time.Time{}, nil, nil, err
 	}
 
 	// The newest stored message anchors the app-state range. A chat with no
@@ -160,6 +154,25 @@ func (rs *ReadState) MarkRead(ctx context.Context, chatJID string, read bool) (s
 				key.Participant = proto.String(s.String())
 			}
 		}
+	}
+
+	return ts, key, msgs, nil
+}
+
+// MarkRead sends read receipts for the chat's unread incoming messages and
+// syncs the read state to your other devices. With read=false it marks the
+// chat unread instead (no receipts are withdrawn: WhatsApp can't do that).
+func (rs *ReadState) MarkRead(ctx context.Context, chatJID string, read bool) (string, error) {
+	if !rs.client.IsConnected() {
+		return "", fmt.Errorf("not connected to WhatsApp")
+	}
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return "", fmt.Errorf("invalid chat JID: %v", err)
+	}
+	ts, key, msgs, err := rs.anchor(ctx, chat)
+	if err != nil {
+		return "", err
 	}
 
 	if !read {

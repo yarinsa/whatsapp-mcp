@@ -212,6 +212,8 @@ Claude can access the following tools to interact with WhatsApp:
 - **mark_chat_unread**: Mark a chat as unread on all your devices
 
 Tools that act on a chat (send, mark read/unread) take it as `"Name (jid)"` (the mark-read tools also need a summary after it: unread count, senders, a truncated quote), e.g. `"Dana Levi (972501234567@s.whatsapp.net)"`, so the approval prompt shows who is affected. A name that does not match the stored chat is refused.
+
+`leave_groups` and `leave_and_delete_groups` are marked destructive. They take the same `"Name (jid) — summary"` entries (summary: last activity, whether you ever wrote, a truncated quote). The second also deletes the chat, messages and media on all your devices, which cannot be undone.
 - **download_media**: Download media from a WhatsApp message and get the local file path
 
 ### Media Handling Features

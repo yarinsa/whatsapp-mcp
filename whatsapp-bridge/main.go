@@ -772,6 +772,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	registerHealthHandler(client)
 	names.registerHandler()
 	readState.registerHandler()
+	readState.registerLeaveHandler()
 
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {

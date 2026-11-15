@@ -846,3 +846,17 @@ def mark_chat(chat_jid: str, read: bool = True) -> Tuple[bool, str]:
         return bool(data.get("success")), data.get("message", "")
     except requests.RequestException as e:
         return False, f"Request error: {e}"
+
+
+def leave_group(chat_jid: str, delete_chat: bool = False) -> Tuple[bool, str]:
+    """Leave a group via the bridge, optionally deleting the chat on all devices."""
+    try:
+        resp = requests.post(f"{WHATSAPP_API_BASE_URL}/leave-group",
+                             json={"chat_jid": chat_jid, "delete_chat": delete_chat}, timeout=30)
+        try:
+            data = resp.json()
+        except ValueError:
+            return False, f"Bridge returned HTTP {resp.status_code}: {resp.text[:200]}"
+        return bool(data.get("success")), data.get("message", "")
+    except requests.RequestException as e:
+        return False, f"Request error: {e}"

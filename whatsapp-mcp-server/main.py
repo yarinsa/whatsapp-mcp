@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -13,7 +14,8 @@ from whatsapp import (
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
-    mark_chat as whatsapp_mark_chat
+    mark_chat as whatsapp_mark_chat,
+    leave_group as whatsapp_leave_group
 )
 from search import search_messages as whatsapp_search_messages
 
@@ -471,6 +473,69 @@ def mark_chat_unread(chat: str) -> Dict[str, Any]:
         return {"success": False, "message": err}
     success, message = whatsapp_mark_chat(jid, read=False)
     return {"success": success, "message": message}
+
+
+_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, readOnlyHint=False, idempotentHint=False)
+
+
+def _leave_groups(groups: List[str], delete_chat: bool) -> Dict[str, Any]:
+    results = []
+    for entry in dict.fromkeys(groups):  # dedupe, keep order
+        m = _CHAT_ENTRY.match(entry or "")
+        if m and not m["summary"]:
+            results.append({"chat": entry, "success": False, "message":
+                            'Add a summary after the JID, e.g. "Building 5 Parents (1203…@g.us) — '
+                            'last active 8 months ago, you never wrote"'})
+            continue
+        jid, err = _resolve_chat(entry)
+        if err:
+            results.append({"chat": entry, "success": False, "message": err})
+            continue
+        if not _is_group(jid):
+            results.append({"chat": entry, "success": False, "message": "Not a group; only groups can be left"})
+            continue
+        ok, msg = whatsapp_leave_group(jid, delete_chat)
+        results.append({"chat": entry, "success": ok, "message": msg})
+    done = sum(r["success"] for r in results)
+    return {"success": done == len(results), "done": done, "failed": len(results) - done, "results": results}
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+@needs_bridge
+def leave_groups(groups: List[str]) -> Dict[str, Any]:
+    """DESTRUCTIVE: exit one or more WhatsApp groups. Members see that you left, and
+    you can only rejoin with an invite link or if an admin re-adds you. The chat and
+    its history stay in your list; use leave_and_delete_groups to remove them too.
+
+    Args:
+        groups: One entry per group as "Group name (jid) — summary", using the exact
+            name and JID from list_chats. The summary is what the user approves, so make it
+            concrete: when it was last active, whether the user ever wrote there, and a
+            truncated quote of the latest message, e.g.
+            ["Building 5 Parents (120363000000000000@g.us) — last active 8 months ago, you never wrote: 'Lost keys…'"].
+            A name that does not match the chat is refused. Only include groups the user
+            chose to leave; never decide on their behalf.
+    """
+    return _leave_groups(groups, delete_chat=False)
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+@needs_bridge
+def leave_and_delete_groups(groups: List[str]) -> Dict[str, Any]:
+    """DESTRUCTIVE AND IRREVERSIBLE: exit one or more WhatsApp groups and delete each
+    chat with its messages and media on all your devices. Members see that you left.
+    Deleted history cannot be recovered.
+
+    Args:
+        groups: One entry per group as "Group name (jid) — summary", using the exact
+            name and JID from list_chats. The summary is what the user approves, so make it
+            concrete: when it was last active, whether the user ever wrote there, and a
+            truncated quote of the latest message, e.g.
+            ["Building 5 Parents (120363000000000000@g.us) — last active 8 months ago, you never wrote: 'Lost keys…'"].
+            A name that does not match the chat is refused. Only include groups the user
+            chose to leave; never decide on their behalf.
+    """
+    return _leave_groups(groups, delete_chat=True)
 
 
 if __name__ == "__main__":
