@@ -78,6 +78,7 @@ func (rs *ReadState) Lists(ctx context.Context, refresh bool) ([]listInfo, error
 		if !rs.client.IsConnected() {
 			return nil, fmt.Errorf("not connected to WhatsApp")
 		}
+		rs.client.EmitAppStateEventsOnFullSync = true // full sync must emit label events so we can mirror them
 		if err := rs.client.FetchAppState(ctx, appstate.WAPatchRegular, true, false); err != nil {
 			return nil, fmt.Errorf("sync lists: %w", err)
 		}
