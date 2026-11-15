@@ -1233,6 +1233,11 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
+	if historySync.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
+		for _, c := range historySync.Data.Conversations {
+			unreadSyncer.answered(c)
+		}
+	}
 }
 
 // Request history sync from the server

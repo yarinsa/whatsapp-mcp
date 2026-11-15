@@ -669,7 +669,7 @@ def fetch_chat_history(chat: str, count: int = 50) -> Dict[str, Any]:
 
 @mcp.tool(annotations=_WRITE)
 @needs_bridge
-def sync_unread(max_chats: int = 25) -> Dict[str, Any]:
+def sync_unread(max_chats: int = 40) -> Dict[str, Any]:
     """Reconcile unread chats with the user's phone after the bridge was down.
 
     Reads the phone's read / marked-unread markers, clears stale unread entries
@@ -679,7 +679,7 @@ def sync_unread(max_chats: int = 25) -> Dict[str, Any]:
     reports drift=true, or when the phone shows unread chats that list_chats lacks.
 
     Args:
-        max_chats: Most threads to backfill in one run (1-50, default 25).
+        max_chats: Most threads to backfill in one run (1-50, default 40).
     """
     return whatsapp_sync_unread(max_chats)
 

@@ -81,6 +81,12 @@ func (rs *ReadState) HandleEvent(evt any) {
 			rs.setRead(v.Chat.String())
 		}
 	case *events.MarkChatAsRead:
+		// A full app-state sync replays every chat's last read marker, however
+		// old. Applying those would zero chats that got new messages since, so
+		// only live markers count here (sync_unread weighs the replayed ones).
+		if v.FromFullSync {
+			return
+		}
 		if v.Action.GetRead() {
 			rs.setRead(v.JID.String())
 		} else {

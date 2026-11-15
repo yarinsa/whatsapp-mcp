@@ -918,7 +918,7 @@ def set_list_chats(list_id: str, chat_jids: List[str], add: bool) -> Dict[str, A
     return _bridge("POST", "/lists/chats", json={"list_id": list_id, "chat_jids": chat_jids, "add": add})
 
 
-def sync_unread(max_chats: int = 25) -> Dict[str, Any]:
+def sync_unread(max_chats: int = 40) -> Dict[str, Any]:
     """Reconcile unread state with the phone via the bridge."""
     try:
         return requests.post(f"{WHATSAPP_API_BASE_URL}/sync/unread",

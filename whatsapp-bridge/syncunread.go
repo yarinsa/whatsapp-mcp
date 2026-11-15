@@ -11,6 +11,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -38,6 +39,7 @@ type unreadSync struct {
 	deleted  map[string]bool
 	collect  bool
 	phoneTot int
+	waiters  map[string]chan *waHistorySync.Conversation
 }
 
 var unreadSyncer = &unreadSync{}
@@ -62,6 +64,21 @@ func (rs *ReadState) storeUnreadTotal() int {
 	var n int
 	rs.db.QueryRow(`SELECT COALESCE(SUM(CASE WHEN unread_count > 0 THEN unread_count WHEN marked_unread THEN 1 ELSE 0 END), 0) FROM chats`).Scan(&n)
 	return n
+}
+
+// answered hands an on-demand history answer to the sync waiting for it.
+// The phone's answer carries the chat's own unread count when it has one,
+// which beats anything we can count locally.
+func (u *unreadSync) answered(c *waHistorySync.Conversation) {
+	u.mu.Lock()
+	ch := u.waiters[c.GetID()]
+	u.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- c:
+		default:
+		}
+	}
 }
 
 // UnreadState is reported by /api/health and /api/unread-state.
@@ -108,7 +125,7 @@ func (rs *ReadState) SyncUnread(ctx context.Context, maxChats int) (map[string]a
 		return nil, fmt.Errorf("not connected to WhatsApp")
 	}
 	if maxChats <= 0 || maxChats > 50 {
-		maxChats = 25
+		maxChats = 40
 	}
 	before := rs.storeUnreadTotal()
 
@@ -226,19 +243,31 @@ func (rs *ReadState) SyncUnread(ctx context.Context, maxChats int) (map[string]a
 		}
 		count := min(c.count, 50)
 		prevNewest, _ := rs.newestMessage(c.jid)
-		n, err := rs.fetchLatest(ctx, c.jid, count, 10*time.Second)
+		n, conv, err := rs.fetchLatest(ctx, c.jid, count, 10*time.Second)
 		entry := map[string]any{"jid": c.jid, "requested": count, "fetched": n}
 		if err != nil {
 			entry["error"] = err.Error()
 		}
-		if n > 0 {
-			backfilled += n
+		backfilled += n
+		var prevUnread int
+		var prevMarked bool
+		rs.db.QueryRow(`SELECT unread_count, marked_unread FROM chats WHERE jid = ?`, c.jid).Scan(&prevUnread, &prevMarked)
+		switch {
+		case conv != nil && conv.UnreadCount != nil:
+			// The phone's own count for this chat.
+			phone, marked := int(conv.GetUnreadCount()), conv.GetMarkedAsUnread()
+			entry["phone_unread"] = phone
+			if phone != prevUnread || marked != prevMarked {
+				rs.ApplyHistory(c.jid, uint32(phone), marked)
+				fixed[c.jid] = fmt.Sprintf("unread %d → %d (phone)", prevUnread, phone)
+			}
+		case n > 0:
 			if added := rs.recountAfter(c.jid, prevNewest); added > 0 {
 				fixed[c.jid] = fmt.Sprintf("backfilled %d messages, %d unread", n, added)
 				entry["unread_added"] = added
 			}
 		}
-		rs.log.Infof("sync_unread: %s requested %d, got %d new", c.jid, count, n)
+		rs.log.Infof("sync_unread: %s requested %d, got %d new, phone unread %v, err %v", c.jid, count, n, entry["phone_unread"], err)
 		perChat = append(perChat, entry)
 	}
 
@@ -299,31 +328,41 @@ func (rs *ReadState) recountAfter(j string, prev time.Time) int {
 }
 
 // fetchLatest asks the phone for the newest count messages of a chat (an
-// on-demand history request anchored at now) and waits for new rows.
-func (rs *ReadState) fetchLatest(ctx context.Context, j string, count int, wait time.Duration) (int, error) {
+// on-demand history request anchored at now) and waits for its answer. It
+// returns how many new rows were stored and the phone's answer, if any.
+func (rs *ReadState) fetchLatest(ctx context.Context, j string, count int, wait time.Duration) (int, *waHistorySync.Conversation, error) {
 	chat, err := types.ParseJID(j)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	var before int
+	u := unreadSyncer
+	ch := make(chan *waHistorySync.Conversation, 1)
+	u.mu.Lock()
+	if u.waiters == nil {
+		u.waiters = map[string]chan *waHistorySync.Conversation{}
+	}
+	u.waiters[j] = ch
+	u.mu.Unlock()
+	defer func() { u.mu.Lock(); delete(u.waiters, j); u.mu.Unlock() }()
+
+	var before, after int
 	rs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE chat_jid = ?`, j).Scan(&before)
 	info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: chat}, Timestamp: time.Now()}
 	msg := rs.client.BuildHistorySyncRequest(info, count)
 	if _, err := rs.client.SendMessage(ctx, rs.client.Store.ID.ToNonAD(), msg, whatsmeow.SendRequestExtra{Peer: true}); err != nil {
-		return 0, fmt.Errorf("history request failed: %v", err)
+		return 0, nil, fmt.Errorf("history request failed: %v", err)
 	}
-	deadline := time.Now().Add(wait)
-	after := before
-	for time.Now().Before(deadline) {
-		time.Sleep(time.Second)
-		rs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE chat_jid = ?`, j).Scan(&after)
-		if after > before {
-			time.Sleep(2 * time.Second)
-			rs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE chat_jid = ?`, j).Scan(&after)
-			break
-		}
+	var conv *waHistorySync.Conversation
+	select {
+	case conv = <-ch:
+	case <-time.After(wait):
+	case <-ctx.Done():
 	}
-	return after - before, nil
+	rs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE chat_jid = ?`, j).Scan(&after)
+	if conv == nil {
+		return after - before, nil, fmt.Errorf("phone didn't answer within %s", wait)
+	}
+	return after - before, conv, nil
 }
 
 // AutoSyncUnread runs once after a (re)connect, at most every 10 minutes.
@@ -338,7 +377,7 @@ func (rs *ReadState) AutoSyncUnread() {
 	time.Sleep(30 * time.Second) // let offline messages and app state settle
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	if res, err := rs.SyncUnread(ctx, 25); err != nil {
+	if res, err := rs.SyncUnread(ctx, 40); err != nil {
 		rs.log.Warnf("Auto unread sync: %v", err)
 	} else {
 		rs.log.Infof("Auto unread sync: %d chats checked, %d fixed, %d messages backfilled",
