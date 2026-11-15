@@ -15,10 +15,34 @@ from whatsapp import (
     download_media as whatsapp_download_media
 )
 
+import functools
+import sys
+
+from bridge import bridge_status as probe_bridge, require_bridge
+
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
 
+
+def needs_bridge(fn):
+    """Fail fast with a clear message when the bridge is down, stale or not ours."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        require_bridge()
+        return fn(*args, **kwargs)
+    return wrapper
+
+
 @mcp.tool()
+def bridge_status() -> Dict[str, Any]:
+    """Check the WhatsApp bridge: whether it is running, connected, and when the last message synced.
+
+    Call this first when other WhatsApp tools fail or return surprisingly little.
+    """
+    return probe_bridge()
+
+@mcp.tool()
+@needs_bridge
 def search_contacts(query: str) -> List[Dict[str, Any]]:
     """Search WhatsApp contacts by name or phone number.
     
@@ -29,6 +53,7 @@ def search_contacts(query: str) -> List[Dict[str, Any]]:
     return contacts
 
 @mcp.tool()
+@needs_bridge
 def list_messages(
     after: Optional[str] = None,
     before: Optional[str] = None,
@@ -70,6 +95,7 @@ def list_messages(
     return messages
 
 @mcp.tool()
+@needs_bridge
 def list_chats(
     query: Optional[str] = None,
     limit: int = 20,
@@ -96,6 +122,7 @@ def list_chats(
     return chats
 
 @mcp.tool()
+@needs_bridge
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
     
@@ -107,6 +134,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]
     return chat
 
 @mcp.tool()
+@needs_bridge
 def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
     """Get WhatsApp chat metadata by sender phone number.
     
@@ -117,6 +145,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
     return chat
 
 @mcp.tool()
+@needs_bridge
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
     """Get all WhatsApp chats involving the contact.
     
@@ -129,6 +158,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
     return chats
 
 @mcp.tool()
+@needs_bridge
 def get_last_interaction(jid: str) -> str:
     """Get most recent WhatsApp message involving the contact.
     
@@ -139,6 +169,7 @@ def get_last_interaction(jid: str) -> str:
     return message
 
 @mcp.tool()
+@needs_bridge
 def get_message_context(
     message_id: str,
     before: int = 5,
@@ -155,6 +186,7 @@ def get_message_context(
     return context
 
 @mcp.tool()
+@needs_bridge
 def send_message(
     recipient: str,
     message: str
@@ -184,6 +216,7 @@ def send_message(
     }
 
 @mcp.tool()
+@needs_bridge
 def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
     
@@ -204,6 +237,7 @@ def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
     }
 
 @mcp.tool()
+@needs_bridge
 def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
     """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
     
@@ -222,6 +256,7 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
     }
 
 @mcp.tool()
+@needs_bridge
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
     
@@ -247,5 +282,6 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
         }
 
 if __name__ == "__main__":
-    # Initialize and run the server
+    status = probe_bridge()
+    print(f"[whatsapp-mcp] bridge check: {status['summary']}", file=sys.stderr)
     mcp.run(transport='stdio')
