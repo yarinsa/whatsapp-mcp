@@ -365,7 +365,7 @@ def _is_group(jid: str) -> bool:
     return jid.endswith("@g.us")
 
 
-_CHAT_ENTRY = re.compile(r"^\s*(?P<name>.*?)\s*\((?P<jid>[^()\s]+@[\w.]+|\d{6,})\)\s*$")
+_CHAT_ENTRY = re.compile(r"^\s*(?P<name>.*?)\s*\((?P<jid>[^()\s]+@[\w.]+|\d{6,})\)\s*(?:[-–—:·|]\s*(?P<summary>.*\S))?\s*$")
 _ENTRY_FORMAT = 'Use the format "Chat name (jid)", e.g. "Dana Levi (972501234567@s.whatsapp.net)"'
 
 
@@ -393,10 +393,18 @@ def _parse_chat_entry(entry: str):
     return (m["name"], m["jid"]) if m else (None, None)
 
 
+_SUMMARY_FORMAT = ('Add a short summary after the JID so the user sees what they approve, e.g. '
+                   '"Dana Levi (972501234567@s.whatsapp.net) — 3 unread from Dana: \'Are you coming tonight?…\'"')
+
+
 def _mark_many_read(chats: List[str], want_groups: bool) -> Dict[str, Any]:
     kind = "group/community" if want_groups else "direct"
     results = []
     for entry in dict.fromkeys(chats):  # dedupe, keep order
+        m = _CHAT_ENTRY.match(entry or "")
+        if m and not m["summary"]:
+            results.append({"chat": entry, "success": False, "message": _SUMMARY_FORMAT})
+            continue
         jid, err = _resolve_chat(entry)
         if err:
             results.append({"chat": entry, "success": False, "message": err})
@@ -420,8 +428,10 @@ def mark_direct_chats_read(chats: List[str]) -> Dict[str, Any]:
     Receipts go only to messages stored on this server; the badge clears either way.
 
     Args:
-        chats: One entry per chat as "Chat name (jid)", using the exact name and JID
-            from list_chats, e.g. ["Dana Levi (972501234567@s.whatsapp.net)"].
+        chats: One entry per chat as "Chat name (jid) — summary", using the exact
+            name and JID from list_chats. The summary is what the user approves, so make it
+            concrete: unread count, who wrote, and a truncated quote of the latest message,
+            e.g. ["Dana Levi (972501234567@s.whatsapp.net) — 3 unread from Dana: 'Are you coming tonight?…'"].
             The user reviews these names before approving, and a name that does not
             match the chat is refused.
     """
@@ -436,8 +446,10 @@ def mark_group_chats_read(chats: List[str]) -> Dict[str, Any]:
     Direct chats are refused; use mark_direct_chats_read for those.
 
     Args:
-        chats: One entry per group as "Group name (jid)", using the exact name and JID
-            from list_chats, e.g. ["Family (120363000000000000@g.us)"].
+        chats: One entry per group as "Group name (jid) — summary", using the exact
+            name and JID from list_chats. The summary is what the user approves, so make it
+            concrete: unread count, who wrote, and a truncated quote of the latest message,
+            e.g. ["Family (120363000000000000@g.us) — 12 unread from Mom, Avi, Noa: 'Who brings dessert?…'"].
             The user reviews these names before approving, and a name that does not
             match the chat is refused.
     """
