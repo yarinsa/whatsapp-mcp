@@ -242,7 +242,18 @@ func (rs *ReadState) syncReadState(ctx context.Context, chat types.JID, read boo
 			k = proto.Clone(key).(*waCommon.MessageKey)
 			k.RemoteJID = proto.String(t.String())
 		}
-		if err := rs.client.SendAppState(ctx, appstate.BuildMarkChatAsRead(t, read, ts, k)); err != nil {
+		err := rs.client.SendAppState(ctx, appstate.BuildMarkChatAsRead(t, read, ts, k))
+		if err != nil && appStateOutOfSync(err) {
+			// Our copy of this app-state collection no longer matches the
+			// server's: download it from scratch, then retry once.
+			rs.log.Warnf("App state regular_low out of sync (%v); resyncing", err)
+			if ferr := rs.client.FetchAppState(ctx, appstate.WAPatchRegularLow, true, false); ferr != nil {
+				rs.log.Errorf("Full app state resync failed: %v", ferr)
+			} else {
+				err = rs.client.SendAppState(ctx, appstate.BuildMarkChatAsRead(t, read, ts, k))
+			}
+		}
+		if err != nil {
 			if i == 0 {
 				return err
 			}
@@ -276,4 +287,11 @@ func (rs *ReadState) registerHandler() {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"success": true, "message": msg})
 	})
+}
+
+// appStateOutOfSync reports a send that failed because our app-state copy
+// diverged from the server's (a 409 conflict or an LTHash mismatch).
+func appStateOutOfSync(err error) bool {
+	m := err.Error()
+	return strings.Contains(m, `code="409"`) || strings.Contains(m, "LTHash")
 }
