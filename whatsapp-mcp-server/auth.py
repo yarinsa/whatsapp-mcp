@@ -13,6 +13,7 @@ as SHA-256 hashes, never in plain text.
 import hashlib
 import hmac
 import html
+import sys
 import json
 import os
 import secrets
@@ -112,6 +113,7 @@ class WhatsAppOAuthProvider:
         return OAuthClientInformationFull.model_validate_json(rows[0][0]) if rows else None
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        _log_client("register", client_info)
         for uri in client_info.redirect_uris or []:
             if not _redirect_allowed(str(uri)):
                 raise RegistrationError(
@@ -127,11 +129,27 @@ class WhatsAppOAuthProvider:
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
         login_id = secrets.token_urlsafe(24)
+        _log_client("authorize", client)
+        self._exec("DELETE FROM logins WHERE expires_at < ?", (time.time(),))
+        # The code is sent once the bridge is connected; until then the login
+        # page shows the bridge's pairing QR code (code_hash stays empty).
+        self._exec(
+            "INSERT INTO logins (id, client_id, params, code_hash, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (login_id, client.client_id, params.model_dump_json(), "", time.time() + LOGIN_TTL),
+        )
+        if _pairing().get("connected") and not self._send_code(login_id, client.client_name):
+            raise AuthorizeError(
+                error="temporarily_unavailable",
+                error_description="Could not send the login code over WhatsApp; is the bridge connected?",
+            )
+        return f"{self.issuer_url}/login?id={login_id}"
+
+    def _send_code(self, login_id: str, client_name: Optional[str]) -> bool:
+        """Send a fresh one-time code to the owner's own chat and store its hash."""
         code = f"{secrets.randbelow(1_000_000):06d}"
-        name = client.client_name or "an MCP client"
         message = (
             f"WhatsApp MCP login code: {code}\n"
-            f"Requested by {name}. It expires in 10 minutes.\n"
+            f"Requested by {client_name or 'an MCP client'}. It expires in 10 minutes.\n"
             "If you didn't start this login, ignore this message."
         )
         try:
@@ -141,24 +159,28 @@ class WhatsAppOAuthProvider:
                 timeout=15,
             )
             ok = resp.status_code == 200 and resp.json().get("success")
-        except requests.RequestException:
+        except (requests.RequestException, ValueError):
             ok = False
-        if not ok:
-            raise AuthorizeError(
-                error="temporarily_unavailable",
-                error_description="Could not send the login code over WhatsApp; is the bridge connected?",
-            )
-        self._exec("DELETE FROM logins WHERE expires_at < ?", (time.time(),))
-        self._exec(
-            "INSERT INTO logins (id, client_id, params, code_hash, expires_at) VALUES (?, ?, ?, ?, ?)",
-            (login_id, client.client_id, params.model_dump_json(), _hash(code), time.time() + LOGIN_TTL),
-        )
-        return f"{self.issuer_url}/login?id={login_id}"
+        if ok:
+            self._exec("UPDATE logins SET code_hash = ? WHERE id = ?", (_hash(code), login_id))
+        return bool(ok)
 
     async def login_page(self, request: Request) -> Response:
         """GET shows the code form; POST checks the code and redirects back to the client."""
         if request.method == "GET":
-            return _login_html(request.query_params.get("id", ""))
+            login_id = request.query_params.get("id", "")
+            rows = self._exec("SELECT client_id, code_hash, expires_at FROM logins WHERE id = ?", (login_id,))
+            if not rows or rows[0][2] < time.time():
+                return _login_html(login_id, "This login expired. Start the connection again from your app.", done=True)
+            client_id, code_hash, _ = rows[0]
+            if not code_hash:
+                state = _pairing()
+                if not state.get("connected"):
+                    return _pairing_html(state.get("qr"), bool(state.get("paired")))
+                client = await self.get_client(client_id)
+                if not self._send_code(login_id, client.client_name if client else None):
+                    return _pairing_html(None, True)
+            return _login_html(login_id)
 
         form = await request.form()
         login_id = str(form.get("id", ""))
@@ -179,6 +201,7 @@ class WhatsAppOAuthProvider:
             return _login_html(login_id, f"Wrong code. {MAX_ATTEMPTS - attempts} tries left.")
 
         self._exec("DELETE FROM logins WHERE id = ?", (login_id,))
+        _log_client("approved", await self.get_client(client_id))
         params = AuthorizationParams.model_validate_json(params_json)
         auth_code = secrets.token_urlsafe(32)
         record = AuthorizationCode(
@@ -268,6 +291,51 @@ class WhatsAppOAuthProvider:
         rows = self._exec("SELECT family FROM tokens WHERE token_hash = ?", (_hash(token.token),))
         if rows:
             self._exec("DELETE FROM tokens WHERE family = ?", (rows[0][0],))
+
+
+def _log_client(event: str, client: Optional[OAuthClientInformationFull]) -> None:
+    """Log which app is connecting (its self-reported name), e.g. for naming the device later."""
+    if client is None:
+        return
+    redirect = str(client.redirect_uris[0]) if client.redirect_uris else ""
+    print(f"[oauth] {event}: client_name={client.client_name!r} client_id={client.client_id} "
+          f"redirect={redirect.split('?')[0]}", file=sys.stderr, flush=True)
+
+
+def _pairing() -> dict:
+    """The bridge's pairing state: {paired, connected, qr?}."""
+    try:
+        return requests.get(f"{API_BASE_URL}/pairing", timeout=5).json()
+    except (requests.RequestException, ValueError):
+        return {}
+
+
+def _pairing_html(qr: Optional[str], paired: bool) -> HTMLResponse:
+    """Shows the bridge's pairing QR code and reloads until the bridge connects."""
+    if qr:
+        title = "Link WhatsApp"
+        body = ("<p>The server isn't linked to WhatsApp. On your phone open WhatsApp → Settings → "
+                "Linked devices → Link a device, and scan this code. Only the account set as owner "
+                "is accepted.</p><div id=\"qr\"></div>"
+                '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>'
+                f"<script>var q=qrcode(0,'L');q.addData({json.dumps(qr)});q.make();"
+                "document.getElementById('qr').innerHTML=q.createSvgTag({cellSize:5,margin:4,scalable:true});</script>")
+    elif paired:
+        title, body = "Connecting…", "<p>The server is reconnecting to WhatsApp. This page refreshes on its own.</p>"
+    else:
+        title, body = "Starting…", "<p>The server is starting up and will show a code to scan in a moment.</p>"
+    return HTMLResponse(f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="5">
+<title>WhatsApp MCP login</title>
+<style>
+ body{{font-family:-apple-system,system-ui,sans-serif;background:#f4f4f2;color:#1a1a1a;margin:0;
+      display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px}}
+ .card{{background:#fff;border-radius:16px;padding:28px;max-width:360px;width:100%;
+        box-shadow:0 2px 12px rgba(0,0,0,.06)}}
+ h1{{font-size:20px;margin:0 0 8px}} p{{color:#555;line-height:1.45;margin:0 0 18px}}
+ #qr svg{{width:100%;height:auto;background:#fff;border-radius:8px}}
+ @media (prefers-color-scheme:dark){{body{{background:#111;color:#eee}}.card{{background:#1c1c1c}}p{{color:#aaa}}}}
+</style></head><body><div class="card"><h1>{title}</h1>{body}</div></body></html>""")
 
 
 def _login_html(login_id: str, error: str = "", done: bool = False) -> HTMLResponse:

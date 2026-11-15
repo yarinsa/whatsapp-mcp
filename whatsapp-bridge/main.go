@@ -778,6 +778,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	readState.registerLeaveHandler()
 	readState.registerChannelHandlers()
 	readState.registerUnreadSyncHandlers()
+	registerPairingHandler(client)
 	readState.registerFetchHistoryHandler()
 	readState.registerListHandlers()
 
@@ -999,6 +1000,8 @@ func main() {
 		case *events.LoggedOut:
 			health.SetDisconnected(true)
 			logger.Warnf("Device logged out, please scan QR code to log in again")
+			// Restart (the container restarts with us) to show a new pairing QR.
+			go func() { time.Sleep(2 * time.Second); os.Exit(1) }()
 		}
 	})
 
@@ -1007,33 +1010,39 @@ func main() {
 
 	// Connect to WhatsApp
 	if client.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
-		qrChan, _ := client.GetQRChannel(context.Background())
-		err = client.Connect()
-		if err != nil {
-			logger.Errorf("Failed to connect: %v", err)
-			return
-		}
-
-		// Print QR code for pairing with phone
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			} else if evt.Event == "success" {
-				connected <- true
-				break
+		// No ID stored: pair with the phone. The QR code is printed to the logs
+		// and served at /api/pairing for the connector's login page. Codes
+		// rotate; when a batch runs out, start a new one until someone scans.
+		for paired := false; !paired; {
+			qrChan, _ := client.GetQRChannel(context.Background())
+			if err := client.Connect(); err != nil {
+				logger.Errorf("Failed to connect: %v", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			for evt := range qrChan {
+				switch evt.Event {
+				case "code":
+					setPairingCode(evt.Code, evt.Timeout)
+					fmt.Println("\nScan this QR code with your WhatsApp app:")
+					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				case "success":
+					paired = true
+				}
+			}
+			setPairingCode("", 0)
+			if !paired {
+				client.Disconnect()
+				continue
+			}
+			// Only the owner's account may pair: anyone can open the login page.
+			if owner := ownerPhone(); owner != "" && client.Store.ID != nil && client.Store.ID.User != owner {
+				logger.Warnf("Paired account %s is not the owner; logging it out", client.Store.ID.User)
+				client.Logout(context.Background())
+				os.Exit(1) // restart with a clean store
 			}
 		}
-
-		// Wait for connection
-		select {
-		case <-connected:
-			fmt.Println("\nSuccessfully connected and authenticated!")
-		case <-time.After(3 * time.Minute):
-			logger.Errorf("Timeout waiting for QR code scan")
-			return
-		}
+		fmt.Println("\nSuccessfully connected and authenticated!")
 	} else {
 		// Already logged in, just connect
 		err = client.Connect()
