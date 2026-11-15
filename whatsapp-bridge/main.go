@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,6 +30,9 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
+
+// names resolves JIDs to contact and group names (see names.go).
+var names *NameResolver
 
 // Message represents a chat message for our client
 type Message struct {
@@ -55,7 +57,7 @@ func NewMessageStore() (*MessageStore, error) {
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -91,6 +93,11 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
 
+	if err := migrateNames(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate name schema: %v", err)
+	}
+
 	return &MessageStore{db: db}, nil
 }
 
@@ -100,10 +107,16 @@ func (store *MessageStore) Close() error {
 }
 
 // Store a chat in the database
-func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
+func (store *MessageStore) StoreChat(jid, name, nameSource string, lastMessageTime time.Time) error {
 	_, err := store.db.Exec(
-		"INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
-		jid, name, lastMessageTime,
+		`INSERT INTO chats (jid, name, name_source, last_message_time) VALUES (?, ?, ?, ?)
+		ON CONFLICT(jid) DO UPDATE SET
+			last_message_time = excluded.last_message_time,
+			name = CASE WHEN excluded.name_source = 'fallback' AND COALESCE(chats.name_source, 'fallback') != 'fallback'
+			            THEN chats.name ELSE excluded.name END,
+			name_source = CASE WHEN excluded.name_source = 'fallback' AND COALESCE(chats.name_source, 'fallback') != 'fallback'
+			            THEN chats.name_source ELSE excluded.name_source END`,
+		jid, name, nameSource, lastMessageTime,
 	)
 	return err
 }
@@ -417,10 +430,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	sender := msg.Info.Sender.User
 
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
-	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
+	name, nameSource := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
-	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
+	err := messageStore.StoreChat(chatJID, name, nameSource, msg.Info.Timestamp)
 	if err != nil {
 		logger.Warnf("Failed to store chat: %v", err)
 	}
@@ -691,6 +704,7 @@ func bridgePort() int {
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	registerHealthHandler(client)
+	names.registerHandler()
 
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
@@ -864,8 +878,11 @@ func main() {
 	startRESTServer(client, messageStore, bridgePort())
 	go runWatchdog()
 
+	names = NewNameResolver(client, messageStore.db, logger)
+
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
+		names.HandleEvent(evt)
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
@@ -877,6 +894,7 @@ func main() {
 
 		case *events.Connected:
 			health.SetConnected()
+			names.StartBackgroundBackfill(time.Minute)
 			logger.Infof("Connected to WhatsApp")
 
 		case *events.Disconnected:
@@ -960,87 +978,20 @@ func main() {
 	client.Disconnect()
 }
 
-// GetChatName determines the appropriate name for a chat based on JID and other info
-func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) string {
-	// First, check if chat already exists in database with a name
-	var existingName string
-	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
-	if err == nil && existingName != "" {
-		// Chat exists with a name, use that
-		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
-		return existingName
+// GetChatName determines the display name for a chat and where it came from.
+// conversation is the history-sync conversation, when there is one.
+func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) (string, string) {
+	var historyName string
+	if conv, ok := conversation.(interface {
+		GetDisplayName() string
+		GetName() string
+	}); ok && jid.Server == types.GroupServer {
+		historyName = conv.GetDisplayName()
+		if historyName == "" {
+			historyName = conv.GetName()
+		}
 	}
-
-	// Need to determine chat name
-	var name string
-
-	if jid.Server == "g.us" {
-		// This is a group chat
-		logger.Infof("Getting name for group: %s", chatJID)
-
-		// Use conversation data if provided (from history sync)
-		if conversation != nil {
-			// Extract name from conversation if available
-			// This uses type assertions to handle different possible types
-			var displayName, convName *string
-			// Try to extract the fields we care about regardless of the exact type
-			v := reflect.ValueOf(conversation)
-			if v.Kind() == reflect.Ptr && !v.IsNil() {
-				v = v.Elem()
-
-				// Try to find DisplayName field
-				if displayNameField := v.FieldByName("DisplayName"); displayNameField.IsValid() && displayNameField.Kind() == reflect.Ptr && !displayNameField.IsNil() {
-					dn := displayNameField.Elem().String()
-					displayName = &dn
-				}
-
-				// Try to find Name field
-				if nameField := v.FieldByName("Name"); nameField.IsValid() && nameField.Kind() == reflect.Ptr && !nameField.IsNil() {
-					n := nameField.Elem().String()
-					convName = &n
-				}
-			}
-
-			// Use the name we found
-			if displayName != nil && *displayName != "" {
-				name = *displayName
-			} else if convName != nil && *convName != "" {
-				name = *convName
-			}
-		}
-
-		// If we didn't get a name, try group info
-		if name == "" {
-			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
-			if err == nil && groupInfo.Name != "" {
-				name = groupInfo.Name
-			} else {
-				// Fallback name for groups
-				name = fmt.Sprintf("Group %s", jid.User)
-			}
-		}
-
-		logger.Infof("Using group name: %s", name)
-	} else {
-		// This is an individual contact
-		logger.Infof("Getting name for contact: %s", chatJID)
-
-		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
-		if err == nil && contact.FullName != "" {
-			name = contact.FullName
-		} else if sender != "" {
-			// Fallback to sender
-			name = sender
-		} else {
-			// Last fallback to JID
-			name = jid.User
-		}
-
-		logger.Infof("Using contact name: %s", name)
-	}
-
-	return name
+	return names.ChatName(context.Background(), jid, historyName)
 }
 
 // Handle history sync events
@@ -1065,7 +1016,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		}
 
 		// Get appropriate chat name by passing the history sync conversation directly
-		name := GetChatName(client, messageStore, jid, chatJID, conversation, "", logger)
+		name, nameSource := GetChatName(client, messageStore, jid, chatJID, conversation, "", logger)
 
 		// Process messages
 		messages := conversation.Messages
@@ -1084,7 +1035,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				continue
 			}
 
-			messageStore.StoreChat(chatJID, name, timestamp)
+			messageStore.StoreChat(chatJID, name, nameSource, timestamp)
 
 			// Store messages
 			for _, msg := range messages {
