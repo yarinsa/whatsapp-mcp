@@ -253,3 +253,27 @@ By default, just the metadata of the media is stored in the local database. The 
 - **WhatsApp Out of Sync**: If your WhatsApp messages get out of sync with the bridge, delete both database files (`whatsapp-bridge/store/messages.db` and `whatsapp-bridge/store/whatsapp.db`) and restart the bridge to re-authenticate.
 
 For additional Claude Desktop integration troubleshooting, see the [MCP documentation](https://modelcontextprotocol.io/quickstart/server#claude-for-desktop-integration-issues). The documentation includes helpful tips for checking logs and resolving common issues.
+
+## Remote deployment (Railway) with OAuth
+
+The `Dockerfile` runs the bridge and the MCP server in one container. The MCP
+server is served over HTTPS at `/mcp` behind OAuth, so you can add it as a
+custom connector in claude.ai and the Claude iPhone app.
+
+To log in, you don't need a password. When a client connects, a 6-digit code
+is sent to your own WhatsApp chat ("Message yourself"). Enter the code on the
+login page to approve the client.
+
+1. Create a Railway service from this repo (it uses `railway.json`).
+2. Add a **Volume** mounted at `/app/whatsapp-bridge/store`.
+3. Generate a public domain, then set these variables:
+   - `PUBLIC_URL`: `https://<your-domain>` (no trailing slash)
+   - `WHATSAPP_OWNER_PHONE`: your number, digits only with country code (e.g. `9725...`)
+   - optional `OAUTH_ALLOWED_REDIRECT_PREFIXES`: comma-separated; the default allows Claude and localhost
+4. Deploy, open the deploy logs, and scan the QR code from WhatsApp → Linked Devices.
+5. Add the connector `https://<your-domain>/mcp` in claude.ai → Settings → Connectors.
+   It syncs to the iPhone app. For Claude Code, run
+   `claude mcp add --transport http whatsapp https://<your-domain>/mcp`.
+
+Access tokens last 1 hour, and refresh tokens last 30 days and rotate on each use.
+The cloud bridge shows up as a separate linked device. Once it works, you can unload the local launchd agents. Never copy your local `store/` to the cloud: two bridges must not share one session.

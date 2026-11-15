@@ -1,0 +1,9 @@
+.git
+**/.venv
+**/__pycache__
+whatsapp-bridge/store
+whatsapp-bridge/logs
+whatsapp-bridge/bridge-bin
+whatsapp-bridge/whatsapp-client
+whatsapp-bridge/.claude
+*.png
