@@ -17,6 +17,8 @@ from whatsapp import (
     mark_chat as whatsapp_mark_chat,
     leave_group as whatsapp_leave_group,
     fetch_history as whatsapp_fetch_history,
+    sync_unread as whatsapp_sync_unread,
+    unread_state as whatsapp_unread_state,
     list_channels as whatsapp_list_channels,
     unfollow_channel as whatsapp_unfollow_channel,
     get_lists as whatsapp_get_lists,
@@ -99,7 +101,10 @@ def bridge_status() -> Dict[str, Any]:
 
     Call this first when other WhatsApp tools fail or return surprisingly little.
     """
-    return probe_bridge()
+    status = probe_bridge()
+    if isinstance(status, dict) and status.get("connected"):
+        status.update(whatsapp_unread_state())
+    return status
 
 @mcp.tool(annotations=_READ)
 @needs_bridge
@@ -201,7 +206,7 @@ def list_chats(
     include_last_message: bool = True,
     sort_by: str = "last_active",
     unread_only: bool = False
-) -> List[Dict[str, Any]]:
+) -> Any:
     """Get WhatsApp chats matching specified criteria.
     
     Args:
@@ -212,7 +217,9 @@ def list_chats(
         sort_by: Field to sort results by, either "last_active" or "name" (default "last_active")
         unread_only: Only return chats with unread messages or marked unread (default False)
 
-    Each chat includes unread_count and marked_unread.
+    Each chat includes unread_count and marked_unread. With unread_only=True the result
+    is {"chats": [...], "phone_unread_total", "store_unread_total", "drift"}; when drift
+    is true, call sync_unread first so messages missed while the bridge was down appear.
     """
     chats = whatsapp_list_chats(
         query=query,
@@ -222,6 +229,8 @@ def list_chats(
         sort_by=sort_by,
         unread_only=unread_only
     )
+    if unread_only:
+        return {"chats": chats, **whatsapp_unread_state()}
     return chats
 
 @mcp.tool(annotations=_READ)
@@ -656,6 +665,23 @@ def fetch_chat_history(chat: str, count: int = 50) -> Dict[str, Any]:
     if err:
         return {"success": False, "message": err}
     return whatsapp_fetch_history(jid, count)
+
+
+@mcp.tool(annotations=_WRITE)
+@needs_bridge
+def sync_unread(max_chats: int = 25) -> Dict[str, Any]:
+    """Reconcile unread chats with the user's phone after the bridge was down.
+
+    Reads the phone's read / marked-unread markers, clears stale unread entries
+    (deleted chats, unfollowed channels, groups left), and pulls the newest messages
+    only for threads that look unread (never ones the phone shows as read). Sends no
+    read receipts. Takes up to a few minutes. Call it when list_chats or bridge_status
+    reports drift=true, or when the phone shows unread chats that list_chats lacks.
+
+    Args:
+        max_chats: Most threads to backfill in one run (1-50, default 25).
+    """
+    return whatsapp_sync_unread(max_chats)
 
 
 @mcp.tool(annotations=_READ)

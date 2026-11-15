@@ -916,3 +916,22 @@ def edit_list(list_id: str, name: str = "", delete: bool = False) -> Dict[str, A
 
 def set_list_chats(list_id: str, chat_jids: List[str], add: bool) -> Dict[str, Any]:
     return _bridge("POST", "/lists/chats", json={"list_id": list_id, "chat_jids": chat_jids, "add": add})
+
+
+def sync_unread(max_chats: int = 25) -> Dict[str, Any]:
+    """Reconcile unread state with the phone via the bridge."""
+    try:
+        return requests.post(f"{WHATSAPP_API_BASE_URL}/sync/unread",
+                             json={"max_chats": max_chats}, timeout=600).json()
+    except (requests.RequestException, ValueError) as e:
+        return {"success": False, "message": f"Request error: {e}"}
+
+
+def unread_state() -> Dict[str, Any]:
+    """Phone vs store unread totals and whether they may have drifted."""
+    try:
+        data = requests.get(f"{WHATSAPP_API_BASE_URL}/unread-state", timeout=10).json()
+        data.pop("success", None)
+        return data
+    except (requests.RequestException, ValueError):
+        return {}

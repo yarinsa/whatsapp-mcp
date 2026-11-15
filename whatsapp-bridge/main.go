@@ -6,6 +6,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/store"
 	"math"
 	"math/rand"
 	"net/http"
@@ -774,6 +777,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	readState.registerHandler()
 	readState.registerLeaveHandler()
 	readState.registerChannelHandlers()
+	readState.registerUnreadSyncHandlers()
 	readState.registerFetchHistoryHandler()
 	readState.registerListHandlers()
 
@@ -906,6 +910,10 @@ func main() {
 		return
 	}
 
+	// How this linked device appears in WhatsApp → Linked Devices. Applied at pairing.
+	store.SetOSInfo(deviceName(), [3]uint32{1, 0, 0})
+	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_DESKTOP.Enum()
+
 	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
@@ -963,6 +971,7 @@ func main() {
 		names.HandleEvent(evt)
 		readState.HandleEvent(evt)
 		readState.HandleListEvent(evt)
+		unreadSyncer.observe(evt)
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
@@ -976,6 +985,7 @@ func main() {
 			health.SetConnected()
 			names.StartBackgroundBackfill(time.Minute)
 			go readState.SyncChannelNames(context.Background())
+			go readState.AutoSyncUnread()
 			logger.Infof("Connected to WhatsApp")
 
 		case *events.Disconnected:
@@ -1116,7 +1126,10 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			}
 
 			messageStore.StoreChat(chatJID, name, nameSource, timestamp)
-			readState.ApplyHistory(chatJID, conversation.GetUnreadCount(), conversation.GetMarkedAsUnread())
+			// On-demand answers carry no unread counts; sync_unread recounts those.
+			if historySync.Data.GetSyncType() != waHistorySync.HistorySync_ON_DEMAND {
+				readState.ApplyHistory(chatJID, conversation.GetUnreadCount(), conversation.GetMarkedAsUnread())
+			}
 
 			// Store messages
 			for _, msg := range messages {
@@ -1420,4 +1433,12 @@ func placeholderWaveform(duration uint32) []byte {
 	}
 
 	return waveform
+}
+
+// deviceName is the linked-device name shown on the phone, e.g. "Claude (MCP)".
+func deviceName() string {
+	if n := os.Getenv("WHATSAPP_DEVICE_NAME"); n != "" {
+		return n
+	}
+	return "Claude (MCP)"
 }
