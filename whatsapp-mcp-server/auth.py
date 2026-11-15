@@ -220,6 +220,9 @@ class WhatsAppOAuthProvider:
     # -- tokens ----------------------------------------------------------
 
     def _issue(self, client_id: str, scopes: list[str], resource: Optional[str], family: str) -> OAuthToken:
+        # Tokens are only for this server's /mcp endpoint; clients that omit the
+        # RFC 8707 `resource` parameter get it filled in.
+        resource = resource or f"{self.issuer_url}/mcp"
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         now = int(time.time())
         at = AccessToken(token=access, client_id=client_id, scopes=scopes, expires_at=now + ACCESS_TTL,

@@ -20,6 +20,7 @@ COPY --from=bridge /out/whatsapp-bridge whatsapp-bridge/whatsapp-bridge
 COPY scripts/start-remote.sh /app/start-remote.sh
 ENV MCP_TRANSPORT=streamable-http \
     WHATSAPP_STORE_DIR=/app/whatsapp-bridge/store \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    WHATSAPP_LOG_MESSAGES=0
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/app/start-remote.sh"]

@@ -542,7 +542,8 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 
 		// Log based on message type
-		if mediaType != "" {
+		if !logMessages {
+		} else if mediaType != "" {
 			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
 		} else if content != "" {
 			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
@@ -882,6 +883,11 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}()
 }
 
+// logMessages controls per-message logging (sender and text of every message).
+// Set WHATSAPP_LOG_MESSAGES=0 on hosted deployments: it floods log limits during
+// history sync and puts private message content into the platform's logs.
+var logMessages = os.Getenv("WHATSAPP_LOG_MESSAGES") != "0"
+
 func main() {
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
@@ -947,7 +953,6 @@ func main() {
 	// Serve /api/health before connecting so a stuck connect is visible.
 	startRESTServer(client, messageStore, bridgePort())
 	go runWatchdog()
-
 
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
@@ -1032,7 +1037,6 @@ func main() {
 	}
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
-
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
@@ -1134,7 +1138,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				}
 
 				// Log the message content for debugging
-				logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
+				if logMessages {
+					logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
+				}
 
 				// Skip messages with no content and no media
 				if content == "" && mediaType == "" {
@@ -1194,7 +1200,8 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				} else {
 					syncedCount++
 					// Log successful message storage
-					if mediaType != "" {
+					if !logMessages {
+					} else if mediaType != "" {
 						logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
 							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
 					} else {
