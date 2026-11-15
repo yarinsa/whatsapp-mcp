@@ -62,18 +62,18 @@ railway variables --set "PUBLIC_URL=https://whatsapp.yarinsa.me" \
 `PUBLIC_URL` must exactly match the domain, with no trailing slash. It becomes
 the OAuth issuer and the only Host header the server accepts.
 
-## 2. Deploy
+## 2. Deploy (automatic from GitHub)
 
-```bash
-railway up --ci          # uploads the local dir (respects .dockerignore), streams build logs, exits
-```
+The service is connected to `yarinsa/whatsapp-mcp`, branch `main`
+(`railway service source connect --repo yarinsa/whatsapp-mcp --branch main --service whatsapp-mcp`).
+**Every push to `main` on the `fork` remote deploys automatically.** Follow it with
+`railway service status --service whatsapp-mcp` or `railway deployment list`.
 
-This deploys the **local working tree**, so the changes don't need to be
-committed. Say so to the user if their changes aren't committed or pushed.
+`railway up --ci` still works for deploying the uncommitted local tree, but the next push replaces it.
 
 ## 3. Redeploy
 
-Run `railway up --ci` again. The volume persists, so no re-pairing or re-login is needed.
+Push to `main`, or run `railway service redeploy`. The volume persists, so no re-pairing or re-login is needed.
 
 ## 4. Pair WhatsApp (first deploy, or after "logged out")
 
