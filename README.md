@@ -234,6 +234,11 @@ You can send various media types to your WhatsApp contacts:
 
 By default, just the metadata of the media is stored in the local database. The message will indicate that media was sent. To access this media you need to use the download_media tool which takes the `message_id` and `chat_jid` (which are shown when printing messages containing the meda), this downloads the media and then returns the file path which can be then opened or passed to another tool.
 
+#### Known gaps: voice messages
+
+- **No transcripts.** The voice message transcripts that WhatsApp shows on iPhone are made on the phone and never sent over the protocol, so the bridge (a linked device) can't read them. Getting text would need server-side speech-to-text, which isn't built yet.
+- **No playback in the Claude UI.** Claude can't take audio input, and its apps don't play audio returned by a tool. Downloaded files stay on the server, so you can't play one from the chat. Planned fix: a short-lived signed URL, returned by a tool, that plays the file in the browser. For now, Claude can resend the voice note to your own "Message yourself" chat with `send_audio_message` so you can play it in WhatsApp.
+
 ## Technical Details
 
 1. Claude sends requests to the Python MCP server
