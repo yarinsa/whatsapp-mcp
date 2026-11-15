@@ -15,7 +15,8 @@ from whatsapp import (
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
     mark_chat as whatsapp_mark_chat,
-    leave_group as whatsapp_leave_group
+    leave_group as whatsapp_leave_group,
+    fetch_history as whatsapp_fetch_history
 )
 from search import search_messages as whatsapp_search_messages
 
@@ -536,6 +537,25 @@ def leave_and_delete_groups(groups: List[str]) -> Dict[str, Any]:
             chose to leave; never decide on their behalf.
     """
     return _leave_groups(groups, delete_chat=True)
+
+
+@mcp.tool()
+@needs_bridge
+def fetch_chat_history(chat_jid: str, count: int = 50) -> Dict[str, Any]:
+    """Pull older messages for a chat from the user's phone, on demand.
+
+    Use this when a chat has little or no stored text (history never synced, or you
+    need more context than list_messages returns) before concluding there is nothing
+    in it. It asks the phone for up to `count` messages older than the oldest stored
+    one, waits up to ~20 seconds for them, and stores them. Then call list_messages
+    again to read them. Call it repeatedly to page further back. The phone must be
+    online; if it returns 0, say the history could not be fetched rather than guessing.
+
+    Args:
+        chat_jid: The chat's JID from list_chats.
+        count: How many older messages to request (1-500, default 50).
+    """
+    return whatsapp_fetch_history(chat_jid, count)
 
 
 if __name__ == "__main__":

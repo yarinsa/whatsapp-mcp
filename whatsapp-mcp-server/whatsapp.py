@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 import os.path
 import requests
 import json
@@ -860,3 +860,17 @@ def leave_group(chat_jid: str, delete_chat: bool = False) -> Tuple[bool, str]:
         return bool(data.get("success")), data.get("message", "")
     except requests.RequestException as e:
         return False, f"Request error: {e}"
+
+
+def fetch_history(chat_jid: str, count: int = 50, wait_seconds: int = 20) -> Dict[str, Any]:
+    """Ask the phone for older messages in a chat and wait for them to be stored."""
+    try:
+        resp = requests.post(f"{WHATSAPP_API_BASE_URL}/fetch-history",
+                             json={"chat_jid": chat_jid, "count": count, "wait_seconds": wait_seconds},
+                             timeout=wait_seconds + 15)
+        try:
+            return resp.json()
+        except ValueError:
+            return {"success": False, "message": f"Bridge returned HTTP {resp.status_code}: {resp.text[:200]}"}
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {e}"}
