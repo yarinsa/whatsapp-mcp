@@ -874,3 +874,30 @@ def fetch_history(chat_jid: str, count: int = 50, wait_seconds: int = 20) -> Dic
             return {"success": False, "message": f"Bridge returned HTTP {resp.status_code}: {resp.text[:200]}"}
     except requests.RequestException as e:
         return {"success": False, "message": f"Request error: {e}"}
+
+
+def _bridge(method: str, path: str, timeout: int = 70, **kw) -> Dict[str, Any]:
+    try:
+        resp = requests.request(method, f"{WHATSAPP_API_BASE_URL}{path}", timeout=timeout, **kw)
+        try:
+            return resp.json()
+        except ValueError:
+            return {"success": False, "message": f"Bridge returned HTTP {resp.status_code}: {resp.text[:200]}"}
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {e}"}
+
+
+def get_lists(refresh: bool = False) -> Dict[str, Any]:
+    return _bridge("GET", "/lists", params={"refresh": "1"} if refresh else None)
+
+
+def create_list(name: str) -> Dict[str, Any]:
+    return _bridge("POST", "/lists/create", json={"name": name})
+
+
+def edit_list(list_id: str, name: str = "", delete: bool = False) -> Dict[str, Any]:
+    return _bridge("POST", "/lists/edit", json={"list_id": list_id, "name": name, "delete": delete})
+
+
+def set_list_chats(list_id: str, chat_jids: List[str], add: bool) -> Dict[str, Any]:
+    return _bridge("POST", "/lists/chats", json={"list_id": list_id, "chat_jids": chat_jids, "add": add})

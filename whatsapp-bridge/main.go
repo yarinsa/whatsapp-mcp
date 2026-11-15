@@ -774,6 +774,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	readState.registerHandler()
 	readState.registerLeaveHandler()
 	readState.registerFetchHistoryHandler()
+	readState.registerListHandlers()
 
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
@@ -960,6 +961,7 @@ func main() {
 	client.AddEventHandler(func(evt interface{}) {
 		names.HandleEvent(evt)
 		readState.HandleEvent(evt)
+		readState.HandleListEvent(evt)
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages

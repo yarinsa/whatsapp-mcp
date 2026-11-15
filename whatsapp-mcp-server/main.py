@@ -16,7 +16,11 @@ from whatsapp import (
     download_media as whatsapp_download_media,
     mark_chat as whatsapp_mark_chat,
     leave_group as whatsapp_leave_group,
-    fetch_history as whatsapp_fetch_history
+    fetch_history as whatsapp_fetch_history,
+    get_lists as whatsapp_get_lists,
+    create_list as whatsapp_create_list,
+    edit_list as whatsapp_edit_list,
+    set_list_chats as whatsapp_set_list_chats
 )
 from search import search_messages as whatsapp_search_messages
 
@@ -556,6 +560,52 @@ def fetch_chat_history(chat_jid: str, count: int = 50) -> Dict[str, Any]:
         count: How many older messages to request (1-500, default 50).
     """
     return whatsapp_fetch_history(chat_jid, count)
+
+
+@mcp.tool()
+@needs_bridge
+def list_chat_lists(refresh: bool = False) -> Dict[str, Any]:
+    """List the user's WhatsApp chat lists (the filters in the chat list, e.g. Favorites
+    and custom lists) with the chats in each.
+
+    Use this before organizing chats into lists, to reuse existing lists instead of
+    creating duplicates. Pass refresh=True to re-sync from WhatsApp if lists were
+    changed on the phone and look stale.
+    """
+    return whatsapp_get_lists(refresh)
+
+
+@mcp.tool()
+@needs_bridge
+def create_chat_list(name: str) -> Dict[str, Any]:
+    """Create a new custom WhatsApp chat list. Returns its list_id.
+
+    Check list_chat_lists first so you don't create a duplicate. Confirm the name
+    with the user before creating it.
+    """
+    return whatsapp_create_list(name)
+
+
+@mcp.tool()
+@needs_bridge
+def update_chat_list(list_id: str, name: str = "", delete: bool = False) -> Dict[str, Any]:
+    """Rename a custom chat list (pass name) or delete it (delete=True).
+
+    Deleting removes only the list, not its chats. Built-in lists can't be changed.
+    Confirm with the user before deleting.
+    """
+    return whatsapp_edit_list(list_id, name, delete)
+
+
+@mcp.tool()
+@needs_bridge
+def set_chats_in_list(list_id: str, chat_jids: List[str], add: bool = True) -> Dict[str, Any]:
+    """Add chats to a list (add=True) or remove them (add=False), in one batch.
+
+    Use it for ongoing organization: propose a grouping, get the user's OK, then
+    apply it. chat_jids come from list_chats. The change syncs to the phone.
+    """
+    return whatsapp_set_list_chats(list_id, chat_jids, add)
 
 
 if __name__ == "__main__":
