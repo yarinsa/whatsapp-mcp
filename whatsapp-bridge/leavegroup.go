@@ -88,6 +88,20 @@ func (rs *ReadState) registerLeaveHandler() {
 	})
 }
 
+// SyncChannelNames stores the real names of followed channels, which history
+// sync leaves as bare numbers, so chat lists and approval prompts show them.
+func (rs *ReadState) SyncChannelNames(ctx context.Context) {
+	list, err := rs.client.GetSubscribedNewsletters(ctx)
+	if err != nil {
+		return
+	}
+	for _, n := range list {
+		if name := n.ThreadMeta.Name.Text; name != "" {
+			rs.db.Exec(`UPDATE chats SET name = ? WHERE jid = ?`, name, n.ID.String())
+		}
+	}
+}
+
 // registerChannelHandlers serves the followed channels (newsletters) and unfollowing them.
 func (rs *ReadState) registerChannelHandlers() {
 	http.HandleFunc("/api/channels", func(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +114,9 @@ func (rs *ReadState) registerChannelHandlers() {
 		}
 		out := []map[string]any{}
 		for _, n := range list {
+			if n.ThreadMeta.Name.Text != "" {
+				rs.db.Exec(`UPDATE chats SET name = ? WHERE jid = ?`, n.ThreadMeta.Name.Text, n.ID.String())
+			}
 			role := ""
 			if n.ViewerMeta != nil {
 				role = string(n.ViewerMeta.Role)

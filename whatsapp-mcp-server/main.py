@@ -410,11 +410,32 @@ def _resolve_chat(entry: str):
     if not jid:
         return None, _ENTRY_FORMAT
     lookup = jid if "@" in jid else f"{jid}@s.whatsapp.net"
+    if _nameless(name, jid) and not lookup.endswith("@s.whatsapp.net"):
+        return None, _NAMELESS
     chat = whatsapp_get_chat(lookup, include_last_message=False)
     actual = (chat.name if chat else None) or ""
     if actual and name.casefold() != actual.casefold():
         return None, f"Name does not match this chat (stored name: {actual}). Nothing was done; retry with the stored name."
     return jid, None
+
+
+_NAMELESS = ("The name is just the chat's number, so the user can't tell what they approve. "
+             "Use its real name (list_chats, list_channels or search_contacts); nothing was done.")
+
+
+def _nameless(name: str, jid: str) -> bool:
+    """True when the "name" is only the JID or its number, not a readable name."""
+    n = (name or "").strip()
+    return not n or n == jid or n == jid.split("@")[0] or n.lstrip("+").isdigit() and "@" in jid and not jid.endswith("@s.whatsapp.net")
+
+
+def _needs_summary(entry: str) -> Optional[str]:
+    """Error message when a "Name (jid)" entry lacks the "— summary" the user approves."""
+    m = _CHAT_ENTRY.match(entry or "")
+    if m and not m["summary"]:
+        return ('Add a short summary after the JID so the user sees what they approve, '
+                'e.g. "Family (1203…@g.us) — 12 unread, last: \'Who brings dessert?…\'"')
+    return None
 
 
 def _parse_chat_entry(entry: str):
@@ -493,9 +514,13 @@ def mark_chat_unread(chat: str) -> Dict[str, Any]:
     It does not undo read receipts already sent.
 
     Args:
-        chat: The chat as "Name (jid)" with the exact name and JID from list_chats,
-            e.g. "Dana Levi (972501234567@s.whatsapp.net)"
+        chat: The chat as "Name (jid) — summary" with the exact name and JID from list_chats
+            and why it is being flagged, e.g.
+            "Dana Levi (972501234567@s.whatsapp.net) — asked about Friday dinner, needs an answer"
     """
+    err = _needs_summary(chat)
+    if err:
+        return {"success": False, "message": err}
     jid, err = _resolve_chat(chat)
     if err:
         return {"success": False, "message": err}
@@ -582,15 +607,22 @@ def unfollow_channels(channels: List[str]) -> Dict[str, Any]:
     """DESTRUCTIVE: unfollow one or more WhatsApp channels. You can follow again later.
 
     Args:
-        channels: One entry per channel as "Channel name (jid@newsletter)", using the exact
-            name and JID from list_channels. A name that does not match is refused.
-            Only include channels the user chose to unfollow.
+        channels: One entry per channel as "Channel name (jid@newsletter) — summary", using
+            the exact name and JID from list_channels, e.g.
+            ["Secret Flights (120363000000000000@newsletter) — flight deals, 40k followers, you never read it"].
+            The user sees these before approving: a bare number as the name, a name that
+            does not match, or a missing summary is refused. Only include channels the user
+            chose to unfollow.
     """
     known = {c["jid"]: c["name"] for c in whatsapp_list_channels().get("channels", [])}
     results = []
     for entry in dict.fromkeys(channels):
         name, jid = _parse_chat_entry(entry or "")
-        if not jid or not jid.endswith("@newsletter"):
+        if _needs_summary(entry):
+            results.append({"channel": entry, "success": False, "message": _needs_summary(entry)})
+        elif jid and _nameless(name, jid):
+            results.append({"channel": entry, "success": False, "message": _NAMELESS})
+        elif not jid or not jid.endswith("@newsletter"):
             results.append({"channel": entry, "success": False, "message": 'Use "Channel name (jid@newsletter)" from list_channels'})
         elif jid not in known:
             results.append({"channel": entry, "success": False, "message": "You don't follow this channel"})
@@ -605,7 +637,7 @@ def unfollow_channels(channels: List[str]) -> Dict[str, Any]:
 
 @mcp.tool(annotations=_WRITE)
 @needs_bridge
-def fetch_chat_history(chat_jid: str, count: int = 50) -> Dict[str, Any]:
+def fetch_chat_history(chat: str, count: int = 50) -> Dict[str, Any]:
     """Pull older messages for a chat from the user's phone, on demand.
 
     Use this when a chat has little or no stored text (history never synced, or you
@@ -616,10 +648,14 @@ def fetch_chat_history(chat_jid: str, count: int = 50) -> Dict[str, Any]:
     online; if it returns 0, say the history could not be fetched rather than guessing.
 
     Args:
-        chat_jid: The chat's JID from list_chats.
+        chat: The chat as "Name (jid)" with the exact name and JID from list_chats,
+            e.g. "Family (120363000000000000@g.us)".
         count: How many older messages to request (1-500, default 50).
     """
-    return whatsapp_fetch_history(chat_jid, count)
+    jid, err = _resolve_chat(chat)
+    if err:
+        return {"success": False, "message": err}
+    return whatsapp_fetch_history(jid, count)
 
 
 @mcp.tool(annotations=_READ)
@@ -648,24 +684,64 @@ def create_chat_list(name: str) -> Dict[str, Any]:
 
 @mcp.tool(annotations=_WRITE)
 @needs_bridge
-def update_chat_list(list_id: str, name: str = "", delete: bool = False) -> Dict[str, Any]:
-    """Rename a custom chat list (pass name) or delete it (delete=True).
+def update_chat_list(chat_list: str, new_name: str = "", delete: bool = False) -> Dict[str, Any]:
+    """Rename a custom chat list (pass new_name) or delete it (delete=True).
 
     Deleting removes only the list, not its chats. Built-in lists can't be changed.
     Confirm with the user before deleting.
+
+    Args:
+        chat_list: The list as "List name (list_id)" from list_chat_lists, e.g. "Work (3)".
+        new_name: The new name, when renaming.
+        delete: Delete the list instead of renaming it.
     """
-    return whatsapp_edit_list(list_id, name, delete)
+    list_id, err = _resolve_list(chat_list)
+    if err:
+        return {"success": False, "message": err}
+    return whatsapp_edit_list(list_id, new_name, delete)
+
+
+def _resolve_list(entry: str):
+    """Turn "List name (list_id)" into a list_id, checking the name matches."""
+    m = re.match(r"^\s*(.*?)\s*\(([^()]+)\)\s*$", entry or "")
+    if not m:
+        return None, 'Use "List name (list_id)" from list_chat_lists, e.g. "Work (3)"'
+    lists = {str(l.get("id")): l.get("name", "") for l in whatsapp_get_lists(False).get("lists") or []}
+    if m[2] not in lists:
+        return None, "No list with that id; check list_chat_lists"
+    if m[1].casefold() != lists[m[2]].casefold():
+        return None, f"Name does not match this list (its name: {lists[m[2]]}). Nothing was done."
+    return m[2], None
 
 
 @mcp.tool(annotations=_WRITE)
 @needs_bridge
-def set_chats_in_list(list_id: str, chat_jids: List[str], add: bool = True) -> Dict[str, Any]:
+def set_chats_in_list(chat_list: str, chats: List[str], add: bool = True) -> Dict[str, Any]:
     """Add chats to a list (add=True) or remove them (add=False), in one batch.
 
     Use it for ongoing organization: propose a grouping, get the user's OK, then
-    apply it. chat_jids come from list_chats. The change syncs to the phone.
+    apply it. The change syncs to the phone.
+
+    Args:
+        chat_list: The list as "List name (list_id)" from list_chat_lists, e.g. "Work (3)".
+        chats: One entry per chat as "Chat name (jid)" with the exact name and JID from
+            list_chats, e.g. ["Family (120363000000000000@g.us)"]. The user reviews these
+            names before approving; a name that does not match the chat is refused.
+        add: True to add the chats, False to remove them.
     """
-    return whatsapp_set_list_chats(list_id, chat_jids, add)
+    list_id, err = _resolve_list(chat_list)
+    if err:
+        return {"success": False, "message": err}
+    jids, errors = [], []
+    for entry in dict.fromkeys(chats):
+        jid, e = _resolve_chat(entry)
+        if e:
+            errors.append({"chat": entry, "message": e})
+        else:
+            jids.append(jid)
+    if errors:
+        return {"success": False, "message": "Nothing was changed; fix these entries", "errors": errors}
+    return whatsapp_set_list_chats(list_id, jids, add)
 
 
 if __name__ == "__main__":

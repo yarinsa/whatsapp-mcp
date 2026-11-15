@@ -975,6 +975,7 @@ func main() {
 		case *events.Connected:
 			health.SetConnected()
 			names.StartBackgroundBackfill(time.Minute)
+			go readState.SyncChannelNames(context.Background())
 			logger.Infof("Connected to WhatsApp")
 
 		case *events.Disconnected:
