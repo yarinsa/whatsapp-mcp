@@ -106,6 +106,69 @@ Without this setup, you'll likely run into errors like:
 
 > `Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work.`
 
+## Running the bridge in the background (macOS)
+
+Pair once in a terminal so the QR code can be scanned:
+
+```bash
+cd whatsapp-bridge && go run .
+```
+
+Then stop it (Ctrl+C) and install the launchd agents:
+
+```bash
+./scripts/install-launchd.sh
+```
+
+This builds `whatsapp-bridge/bridge-bin` and installs two agents:
+
+- `com.yarin.whatsapp-bridge` starts the bridge at login and restarts it within about 10 seconds if it exits. Logs go to `~/Library/Logs/whatsapp-bridge.log`.
+- `com.yarin.whatsapp-bridge-watchdog` checks `/api/health` every 5 minutes and shows a macOS notification after 30 minutes unreachable or disconnected, and again when it recovers.
+
+The bridge itself also exits after 10 minutes without a WhatsApp connection so launchd starts a fresh process, and notifies after 30 minutes offline. A logged-out session is not restarted; pair again with `go run .`.
+
+To remove the agents (your session in `store/` is left alone):
+
+```bash
+./scripts/uninstall-launchd.sh
+```
+
+After changing bridge code, run `./scripts/install-launchd.sh` again to rebuild and restart.
+
+### Environment variables
+
+| Variable | Used by | Default | Purpose |
+| --- | --- | --- | --- |
+| `WHATSAPP_BRIDGE_PORT` | bridge, MCP server, install script | `8765` | REST API port. Set the same value for both; pass it to the install script to bake it into the agents. |
+| `WHATSAPP_API_BASE_URL` | MCP server | `http://127.0.0.1:$WHATSAPP_BRIDGE_PORT/api` | Full override of the bridge URL. |
+| `WHATSAPP_QUIET_WARN_SECONDS` | MCP server | `21600` | `bridge_status` warns when connected but no message arrived for this long. |
+
+For Claude Desktop or Claude Code, add the variable to the server's `env` in your MCP config when using a non-default port:
+
+```json
+"whatsapp": {
+  "command": "uv",
+  "args": ["--directory", "/path/to/whatsapp-mcp/whatsapp-mcp-server", "run", "main.py"],
+  "env": { "WHATSAPP_BRIDGE_PORT": "8765" }
+}
+```
+
+### Health check
+
+```bash
+curl -s http://127.0.0.1:8765/api/health
+```
+
+Returns `service`, `status` (`ok`, `disconnected`, `logged_out`), `connected`, `last_message_at`, `last_event_at`, `seconds_since_last_event` and uptime. The MCP server checks this at startup and before each tool call, so tools fail with a message such as "Bridge is down" or "Port 8765 is answered by another service" instead of returning empty results.
+
+### Contact names
+
+The bridge resolves WhatsApp LIDs to phone numbers and names using whatsmeow's LID map and contact store (full name, first name, business name, push name), and group subjects for groups. Names are stored in `chats.name` and a `contacts` table in `messages.db`, backfilled in the background a minute after the bridge connects, and updated on contact, push-name and group events. Force a refresh with:
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/api/resync-names
+```
+
 ## Architecture Overview
 
 This application consists of two main components:
@@ -128,7 +191,8 @@ Once connected, you can interact with your WhatsApp contacts through Claude, lev
 
 Claude can access the following tools to interact with WhatsApp:
 
-- **search_contacts**: Search for contacts by name or phone number
+- **bridge_status**: Check whether the bridge is running, connected, and when the last message synced
+- **search_contacts**: Search for people by name (Hebrew or English, saved or push name) or phone number; returns name, phone JID and LID
 - **list_messages**: Retrieve messages with optional filters and context
 - **list_chats**: List available chats with metadata
 - **get_chat**: Get information about a specific chat
@@ -170,7 +234,9 @@ By default, just the metadata of the media is stored in the local database. The 
 ## Troubleshooting
 
 - If you encounter permission issues when running uv, you may need to add it to your PATH or use the full path to the executable.
-- Make sure both the Go application and the Python server are running for the integration to work properly.
+- Make sure both the Go application and the Python server are running for the integration to work properly. Ask Claude to run `bridge_status`, or `curl` the health endpoint, to see which side is failing.
+- **"Route POST:/api/send not found" or "answered by another service"**: another app holds the bridge port. Pick a free port with `WHATSAPP_BRIDGE_PORT` for both the bridge (rerun the install script with it) and the MCP server config.
+- **Bridge not running**: `launchctl list | grep whatsapp` and `tail -f ~/Library/Logs/whatsapp-bridge.log`.
 
 ### Authentication Issues
 
