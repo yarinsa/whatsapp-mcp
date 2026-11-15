@@ -60,15 +60,21 @@ func (u *unreadSync) observe(evt any) {
 	}
 }
 
-func (rs *ReadState) storeUnreadTotal() int {
+// storeUnreadChats counts unread chats, like the phone's Chats badge does
+// (a chat with unread messages or marked unread counts once).
+func (rs *ReadState) storeUnreadChats() int {
 	var n int
-	rs.db.QueryRow(`SELECT COALESCE(SUM(CASE WHEN unread_count > 0 THEN unread_count WHEN marked_unread THEN 1 ELSE 0 END), 0) FROM chats`).Scan(&n)
+	rs.db.QueryRow(`SELECT COUNT(*) FROM chats WHERE unread_count > 0 OR marked_unread`).Scan(&n)
+	return n
+}
+
+func (rs *ReadState) storeUnreadMessages() int {
+	var n int
+	rs.db.QueryRow(`SELECT COALESCE(SUM(unread_count), 0) FROM chats`).Scan(&n)
 	return n
 }
 
 // answered hands an on-demand history answer to the sync waiting for it.
-// The phone's answer carries the chat's own unread count when it has one,
-// which beats anything we can count locally.
 func (u *unreadSync) answered(c *waHistorySync.Conversation) {
 	u.mu.Lock()
 	ch := u.waiters[c.GetID()]
@@ -90,15 +96,14 @@ func (rs *ReadState) UnreadState() map[string]any {
 	health.mu.Lock()
 	connectedAt := health.connectedAt
 	health.mu.Unlock()
-	store := rs.storeUnreadTotal()
-	out := map[string]any{"store_unread_total": store}
+	out := map[string]any{"store_unread_chats": rs.storeUnreadChats(), "store_unread_messages": rs.storeUnreadMessages()}
 	if lastRun.IsZero() {
-		out["phone_unread_total"] = nil
+		out["phone_unread_chats"] = nil
 		out["drift"] = true
 		out["hint"] = "Unread state hasn't been reconciled with the phone yet: call sync_unread"
 		return out
 	}
-	out["phone_unread_total"] = phoneTot
+	out["phone_unread_chats"] = phoneTot
 	out["last_unread_sync"] = lastRun.UTC().Format(time.RFC3339)
 	drift := lastRun.Before(connectedAt)
 	out["drift"] = drift
@@ -127,7 +132,7 @@ func (rs *ReadState) SyncUnread(ctx context.Context, maxChats int) (map[string]a
 	if maxChats <= 0 || maxChats > 50 {
 		maxChats = 40
 	}
-	before := rs.storeUnreadTotal()
+	before := rs.storeUnreadChats()
 
 	// 1. Phone markers: a full app-state read of the patches that carry them.
 	rs.client.EmitAppStateEventsOnFullSync = true
@@ -271,21 +276,21 @@ func (rs *ReadState) SyncUnread(ctx context.Context, maxChats int) (map[string]a
 		perChat = append(perChat, entry)
 	}
 
-	after := rs.storeUnreadTotal()
+	after := rs.storeUnreadChats()
 	fixedList := []map[string]string{}
 	for j, why := range fixed {
 		fixedList = append(fixedList, map[string]string{"jid": j, "name": rs.chatName(j), "change": why})
 	}
 	res := map[string]any{
-		"phone_markers_read":  len(markers),
-		"chats_checked":       len(cands),
-		"chats_fixed":         len(fixed),
-		"messages_backfilled": backfilled,
-		"store_unread_before": before,
-		"store_unread_after":  after,
-		"fixed":               fixedList,
-		"backfill":            perChat,
-		"note":                "WhatsApp doesn't expose the phone's badge count; the phone total is the store total after reconciling with the phone's read markers and backfilling likely-unread threads.",
+		"phone_markers_read":        len(markers),
+		"chats_checked":             len(cands),
+		"chats_fixed":               len(fixed),
+		"messages_backfilled":       backfilled,
+		"store_unread_chats_before": before,
+		"store_unread_chats_after":  after,
+		"fixed":                     fixedList,
+		"backfill":                  perChat,
+		"note":                      "WhatsApp doesn't expose the phone's badge count; the phone count is the store's unread chat count after reconciling with the phone's read markers and backfilling likely-unread threads.",
 	}
 	u.mu.Lock()
 	u.lastRun, u.phoneTot, u.result = time.Now(), after, res

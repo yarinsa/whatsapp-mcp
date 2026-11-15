@@ -218,7 +218,7 @@ def list_chats(
         unread_only: Only return chats with unread messages or marked unread (default False)
 
     Each chat includes unread_count and marked_unread. With unread_only=True the result
-    is {"chats": [...], "phone_unread_total", "store_unread_total", "drift"}; when drift
+    is {"chats": [...], "phone_unread_chats", "store_unread_chats" (unread chats, like the phone badge), "store_unread_messages", "drift"}; when drift
     is true, call sync_unread first so messages missed while the bridge was down appear.
     """
     chats = whatsapp_list_chats(
