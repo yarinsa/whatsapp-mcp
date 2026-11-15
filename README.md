@@ -210,6 +210,8 @@ Claude can access the following tools to interact with WhatsApp:
 - **mark_direct_chats_read**: Mark one or more 1:1 chats as read (read receipts + clears the unread badge on your phone)
 - **mark_group_chats_read**: Mark one or more groups/communities as read. Separate from DMs so you can always-allow one and approve the other each time
 - **mark_chat_unread**: Mark a chat as unread on all your devices
+
+Tools that act on a chat (send, mark read/unread) take it as `"Name (jid)"`, e.g. `"Dana Levi (972501234567@s.whatsapp.net)"`, so the approval prompt shows who is affected. A name that does not match the stored chat is refused.
 - **download_media**: Download media from a WhatsApp message and get the local file path
 
 ### Media Handling Features

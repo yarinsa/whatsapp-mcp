@@ -18,6 +18,7 @@ from whatsapp import (
 from search import search_messages as whatsapp_search_messages
 
 import dataclasses
+import re
 import functools
 from datetime import datetime
 import os
@@ -277,73 +278,61 @@ def get_message_context(
 
 @mcp.tool()
 @needs_bridge
-def send_message(
-    recipient: str,
-    message: str
-) -> Dict[str, Any]:
-    """Send a WhatsApp message to a person or group. For group chats use the JID.
+def send_message(recipient: str, message: str) -> Dict[str, Any]:
+    """Send a WhatsApp text message to a person or group.
 
     Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+        recipient: Who gets it, as "Name (jid)" with the exact name and JID from list_chats
+            or search_contacts, e.g. "Dana Levi (972501234567@s.whatsapp.net)" or
+            "Family (120363000000000000@g.us)". For a number with no chat yet use
+            "Name (972501234567)". The user reviews this before approving, and a name
+            that does not match the chat is refused.
         message: The message text to send
-    
-    Returns:
-        A dictionary containing success status and a status message
     """
-    # Validate input
-    if not recipient:
-        return {
-            "success": False,
-            "message": "Recipient must be provided"
-        }
-    
-    # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
-    return {
-        "success": success,
-        "message": status_message
-    }
+    jid, err = _resolve_chat(recipient)
+    if err:
+        return {"success": False, "message": err}
+    success, status_message = whatsapp_send_message(jid, message)
+    return {"success": success, "message": status_message}
 
 @mcp.tool()
 @needs_bridge
 def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
-    """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
-    
+    """Send a file (picture, video, document or raw audio) to a person or group.
+
     Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the media file to send (image, video, document)
-    
-    Returns:
-        A dictionary containing success status and a status message
+        recipient: Who gets it, as "Name (jid)" with the exact name and JID from list_chats
+            or search_contacts, e.g. "Dana Levi (972501234567@s.whatsapp.net)" or
+            "Family (120363000000000000@g.us)". For a number with no chat yet use
+            "Name (972501234567)". The user reviews this before approving, and a name
+            that does not match the chat is refused.
+        media_path: Absolute path to the file to send
     """
-    
-    # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path)
-    return {
-        "success": success,
-        "message": status_message
-    }
+    jid, err = _resolve_chat(recipient)
+    if err:
+        return {"success": False, "message": err}
+    success, status_message = whatsapp_send_file(jid, media_path)
+    return {"success": success, "message": status_message}
 
 @mcp.tool()
 @needs_bridge
 def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
-    """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
-    
+    """Send an audio file as a WhatsApp voice message. If it fails because ffmpeg
+    is missing, use send_file instead.
+
     Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
-    
-    Returns:
-        A dictionary containing success status and a status message
+        recipient: Who gets it, as "Name (jid)" with the exact name and JID from list_chats
+            or search_contacts, e.g. "Dana Levi (972501234567@s.whatsapp.net)" or
+            "Family (120363000000000000@g.us)". For a number with no chat yet use
+            "Name (972501234567)". The user reviews this before approving, and a name
+            that does not match the chat is refused.
+        media_path: Absolute path to the audio file (converted to Opus .ogg if needed)
     """
-    success, status_message = whatsapp_audio_voice_message(recipient, media_path)
-    return {
-        "success": success,
-        "message": status_message
-    }
+    jid, err = _resolve_chat(recipient)
+    if err:
+        return {"success": False, "message": err}
+    success, status_message = whatsapp_audio_voice_message(jid, media_path)
+    return {"success": success, "message": status_message}
 
 @mcp.tool()
 @needs_bridge
@@ -376,57 +365,99 @@ def _is_group(jid: str) -> bool:
     return jid.endswith("@g.us")
 
 
-def _mark_many_read(chat_jids: List[str], want_groups: bool) -> Dict[str, Any]:
+_CHAT_ENTRY = re.compile(r"^\s*(?P<name>.*?)\s*\((?P<jid>[^()\s]+@[\w.]+|\d{6,})\)\s*$")
+_ENTRY_FORMAT = 'Use the format "Chat name (jid)", e.g. "Dana Levi (972501234567@s.whatsapp.net)"'
+
+
+def _resolve_chat(entry: str):
+    """Turn a "Name (jid)" entry into a JID, checking the name against the stored chat.
+
+    Approval prompts show these entries, so the name must really belong to the JID.
+    A chat that isn't stored yet (e.g. a new phone number) is accepted as given.
+    Returns (jid, None) on success or (None, error message).
+    """
+    name, jid = _parse_chat_entry(entry or "")
+    if not jid:
+        return None, _ENTRY_FORMAT
+    lookup = jid if "@" in jid else f"{jid}@s.whatsapp.net"
+    chat = whatsapp_get_chat(lookup, include_last_message=False)
+    actual = (chat.name if chat else None) or ""
+    if actual and name.casefold() != actual.casefold():
+        return None, f"Name does not match this chat (stored name: {actual}). Nothing was done; retry with the stored name."
+    return jid, None
+
+
+def _parse_chat_entry(entry: str):
+    """Split "Name (jid)" into (name, jid). Returns (None, None) if malformed."""
+    m = _CHAT_ENTRY.match(entry)
+    return (m["name"], m["jid"]) if m else (None, None)
+
+
+def _mark_many_read(chats: List[str], want_groups: bool) -> Dict[str, Any]:
     kind = "group/community" if want_groups else "direct"
     results = []
-    for jid in dict.fromkeys(chat_jids):  # dedupe, keep order
+    for entry in dict.fromkeys(chats):  # dedupe, keep order
+        jid, err = _resolve_chat(entry)
+        if err:
+            results.append({"chat": entry, "success": False, "message": err})
+            continue
         if _is_group(jid) != want_groups:
-            results.append({"chat_jid": jid, "success": False,
+            results.append({"chat": entry, "success": False,
                             "message": f"Not a {kind} chat; use mark_{'direct' if want_groups else 'group'}_chats_read"})
             continue
         ok, msg = whatsapp_mark_chat(jid, read=True)
-        results.append({"chat_jid": jid, "success": ok, "message": msg})
+        results.append({"chat": entry, "success": ok, "message": msg})
     done = sum(r["success"] for r in results)
     return {"success": done == len(results), "marked": done, "failed": len(results) - done, "results": results}
 
 
 @mcp.tool()
 @needs_bridge
-def mark_direct_chats_read(chat_jids: List[str]) -> Dict[str, Any]:
+def mark_direct_chats_read(chats: List[str]) -> Dict[str, Any]:
     """Mark one or more direct (1:1) WhatsApp chats as read. The other person sees
     blue ticks, and the unread badge clears on your phone and other devices.
-    Group or community JIDs are refused; use mark_group_chats_read for those.
+    Group or community chats are refused; use mark_group_chats_read for those.
     Receipts go only to messages stored on this server; the badge clears either way.
 
     Args:
-        chat_jids: JIDs of direct chats (from list_chats), e.g. ["972501234567@s.whatsapp.net", "123456789@lid"]
+        chats: One entry per chat as "Chat name (jid)", using the exact name and JID
+            from list_chats, e.g. ["Dana Levi (972501234567@s.whatsapp.net)"].
+            The user reviews these names before approving, and a name that does not
+            match the chat is refused.
     """
-    return _mark_many_read(chat_jids, want_groups=False)
+    return _mark_many_read(chats, want_groups=False)
 
 
 @mcp.tool()
 @needs_bridge
-def mark_group_chats_read(chat_jids: List[str]) -> Dict[str, Any]:
+def mark_group_chats_read(chats: List[str]) -> Dict[str, Any]:
     """Mark one or more WhatsApp groups or communities as read. Members may see your
     read receipt, and the unread badge clears on your phone and other devices.
-    Direct-chat JIDs are refused; use mark_direct_chats_read for those.
+    Direct chats are refused; use mark_direct_chats_read for those.
 
     Args:
-        chat_jids: JIDs of groups/communities (from list_chats), e.g. ["120363000000000000@g.us"]
+        chats: One entry per group as "Group name (jid)", using the exact name and JID
+            from list_chats, e.g. ["Family (120363000000000000@g.us)"].
+            The user reviews these names before approving, and a name that does not
+            match the chat is refused.
     """
-    return _mark_many_read(chat_jids, want_groups=True)
+    return _mark_many_read(chats, want_groups=True)
 
 
 @mcp.tool()
 @needs_bridge
-def mark_chat_unread(chat_jid: str) -> Dict[str, Any]:
+def mark_chat_unread(chat: str) -> Dict[str, Any]:
     """Mark a WhatsApp chat as unread on all your devices (a reminder to come back to it).
     It does not undo read receipts already sent.
 
     Args:
-        chat_jid: The JID of the chat (from list_chats)
+        chat: The chat as "Name (jid)" with the exact name and JID from list_chats,
+            e.g. "Dana Levi (972501234567@s.whatsapp.net)"
     """
-    success, message = whatsapp_mark_chat(chat_jid, read=False)
+    jid, err = _resolve_chat(chat)
+    if err:
+        return {"success": False, "message": err}
+    success, message = whatsapp_mark_chat(jid, read=False)
     return {"success": success, "message": message}
 
 
