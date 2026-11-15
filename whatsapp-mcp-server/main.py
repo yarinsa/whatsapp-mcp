@@ -17,7 +17,9 @@ from whatsapp import (
 )
 from search import search_messages as whatsapp_search_messages
 
+import dataclasses
 import functools
+from datetime import datetime
 import os
 import sys
 
@@ -44,6 +46,7 @@ if TRANSPORT == "streamable-http":
             ),
             revocation_options=RevocationOptions(enabled=True),
             required_scopes=[SCOPE],
+            validate_token_resource=True,
         ),
     )
     mcp.custom_route("/login", methods=["GET", "POST"])(oauth.login_page)
@@ -51,12 +54,27 @@ else:
     mcp = MCPServer("whatsapp")
 
 
+def plain(value: Any) -> Any:
+    """Turn the dataclasses the query layer returns (Chat, Contact, Message...)
+    into JSON-ready dicts. MCP SDK 2 validates tool output against the declared
+    return type, so a dataclass where a dict is declared fails the call."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: plain(getattr(value, f.name)) for f in dataclasses.fields(value)}
+    if isinstance(value, (list, tuple)):
+        return [plain(v) for v in value]
+    if isinstance(value, dict):
+        return {k: plain(v) for k, v in value.items()}
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
 def needs_bridge(fn):
     """Fail fast with a clear message when the bridge is down, stale or not ours."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         require_bridge()
-        return fn(*args, **kwargs)
+        return plain(fn(*args, **kwargs))
     return wrapper
 
 
@@ -94,7 +112,7 @@ def list_messages(
     include_context: Optional[bool] = None,
     context_before: int = 1,
     context_after: int = 1
-) -> List[Dict[str, Any]]:
+) -> str:
     """Get WhatsApp messages matching specified criteria with optional context.
 
     For keyword search prefer search_messages (indexed, compact output).
@@ -193,7 +211,7 @@ def list_chats(
 
 @mcp.tool()
 @needs_bridge
-def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]:
+def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Dict[str, Any]]:
     """Get WhatsApp chat metadata by JID.
     
     Args:
@@ -205,7 +223,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]
 
 @mcp.tool()
 @needs_bridge
-def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
+def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Dict[str, Any]]:
     """Get WhatsApp chat metadata by sender phone number.
     
     Args:

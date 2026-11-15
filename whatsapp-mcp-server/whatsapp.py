@@ -363,14 +363,17 @@ def list_chats(
         cursor = conn.cursor()
         
         # Build base query
-        query_parts = ["""
-            SELECT 
+        last_cols = (
+            "messages.content, messages.sender, messages.is_from_me"
+            if include_last_message
+            else "NULL, NULL, NULL"
+        )
+        query_parts = [f"""
+            SELECT
                 chats.jid,
                 chats.name,
                 chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
+                {last_cols}
             FROM chats
         """]
         
