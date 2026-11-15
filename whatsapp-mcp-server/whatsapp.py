@@ -860,6 +860,23 @@ def leave_group(chat_jid: str, delete_chat: bool = False) -> Tuple[bool, str]:
         return False, f"Request error: {e}"
 
 
+def list_channels() -> Dict[str, Any]:
+    """List the channels (newsletters) you follow, live from WhatsApp."""
+    try:
+        return requests.get(f"{WHATSAPP_API_BASE_URL}/channels", timeout=30).json()
+    except (requests.RequestException, ValueError) as e:
+        return {"success": False, "message": f"Request error: {e}"}
+
+
+def unfollow_channel(jid: str) -> Tuple[bool, str]:
+    """Unfollow a channel (newsletter) via the bridge."""
+    try:
+        data = requests.post(f"{WHATSAPP_API_BASE_URL}/unfollow-channel", json={"jid": jid}, timeout=30).json()
+        return bool(data.get("success")), data.get("message", "")
+    except (requests.RequestException, ValueError) as e:
+        return False, f"Request error: {e}"
+
+
 def fetch_history(chat_jid: str, count: int = 50, wait_seconds: int = 20) -> Dict[str, Any]:
     """Ask the phone for older messages in a chat and wait for them to be stored."""
     try:

@@ -20,11 +20,36 @@ func (rs *ReadState) LeaveGroup(ctx context.Context, chatJID string, deleteChat 
 	if err != nil || chat.Server != types.GroupServer {
 		return "", fmt.Errorf("not a group JID: %s", chatJID)
 	}
+	what := "group"
+	info, infoErr := rs.client.GetGroupInfo(ctx, chat)
+	if infoErr == nil && info.IsDefaultSubGroup && !info.LinkedParentJID.IsEmpty() {
+		// A community's announcement group can't be left on its own: leave the community.
+		chat = info.LinkedParentJID
+		chatJID = chat.String()
+		info, infoErr = rs.client.GetGroupInfo(ctx, chat)
+	}
+	if infoErr == nil && info.IsParent {
+		what = "community"
+		subs, err := rs.client.GetSubGroups(ctx, chat)
+		if err != nil {
+			return "", fmt.Errorf("list community groups: %w", err)
+		}
+		left := 0
+		for _, sub := range subs {
+			if sub.IsDefaultSubGroup {
+				continue // goes with the community itself
+			}
+			if rs.client.LeaveGroup(ctx, sub.JID) == nil { // fails for groups you aren't in
+				left++
+			}
+		}
+		what = fmt.Sprintf("community and %d of its groups", left)
+	}
 	if err := rs.client.LeaveGroup(ctx, chat); err != nil {
-		return "", fmt.Errorf("leave group: %w", err)
+		return "", fmt.Errorf("leave %s: %w", what, err)
 	}
 	if !deleteChat {
-		return "Left the group (the chat stays in your list)", nil
+		return "Left the " + what + " (the chat stays in your list)", nil
 	}
 	ts, key, _, err := rs.anchor(ctx, chat)
 	if err != nil {
@@ -35,7 +60,7 @@ func (rs *ReadState) LeaveGroup(ctx context.Context, chatJID string, deleteChat 
 	}
 	rs.db.Exec(`DELETE FROM messages WHERE chat_jid = ?`, chatJID)
 	rs.db.Exec(`DELETE FROM chats WHERE jid = ?`, chatJID)
-	return "Left the group and deleted the chat on all devices", nil
+	return "Left the " + what + " and deleted the chat on all devices", nil
 }
 
 func (rs *ReadState) registerLeaveHandler() {
@@ -60,5 +85,48 @@ func (rs *ReadState) registerLeaveHandler() {
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{"success": true, "message": msg})
+	})
+}
+
+// registerChannelHandlers serves the followed channels (newsletters) and unfollowing them.
+func (rs *ReadState) registerChannelHandlers() {
+	http.HandleFunc("/api/channels", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		list, err := rs.client.GetSubscribedNewsletters(r.Context())
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "message": err.Error()})
+			return
+		}
+		out := []map[string]any{}
+		for _, n := range list {
+			role := ""
+			if n.ViewerMeta != nil {
+				role = string(n.ViewerMeta.Role)
+			}
+			out = append(out, map[string]any{"jid": n.ID.String(), "name": n.ThreadMeta.Name.Text,
+				"subscribers": n.ThreadMeta.SubscriberCount, "role": role})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "channels": out})
+	})
+	http.HandleFunc("/api/unfollow-channel", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var req struct {
+			JID string `json:"jid"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		jid, err := types.ParseJID(req.JID)
+		if err == nil && jid.Server != types.NewsletterServer {
+			err = fmt.Errorf("not a channel JID: %s", req.JID)
+		}
+		if err == nil {
+			err = rs.client.UnfollowNewsletter(r.Context(), jid)
+		}
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "message": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "Unfollowed the channel"})
 	})
 }

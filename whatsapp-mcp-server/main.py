@@ -17,6 +17,8 @@ from whatsapp import (
     mark_chat as whatsapp_mark_chat,
     leave_group as whatsapp_leave_group,
     fetch_history as whatsapp_fetch_history,
+    list_channels as whatsapp_list_channels,
+    unfollow_channel as whatsapp_unfollow_channel,
     get_lists as whatsapp_get_lists,
     create_list as whatsapp_create_list,
     edit_list as whatsapp_edit_list,
@@ -86,7 +88,12 @@ def needs_bridge(fn):
     return wrapper
 
 
-@mcp.tool()
+_READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
+_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, readOnlyHint=False, idempotentHint=False, openWorldHint=True)
+
+
+@mcp.tool(annotations=_READ)
 def bridge_status() -> Dict[str, Any]:
     """Check the WhatsApp bridge: whether it is running, connected, and when the last message synced.
 
@@ -94,7 +101,7 @@ def bridge_status() -> Dict[str, Any]:
     """
     return probe_bridge()
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def search_contacts(query: str) -> List[Dict[str, Any]]:
     """Search WhatsApp contacts and groups by name (Hebrew or English) or phone number.
@@ -107,7 +114,7 @@ def search_contacts(query: str) -> List[Dict[str, Any]]:
     contacts = whatsapp_search_contacts(query)
     return contacts
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def list_messages(
     after: Optional[str] = None,
@@ -151,7 +158,7 @@ def list_messages(
     )
     return messages
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def search_messages(
     query: Optional[str] = None,
@@ -185,7 +192,7 @@ def search_messages(
     """
     return whatsapp_search_messages(query, chat_jid, sender, after, before, from_me, media_type, sort, limit, page)
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def list_chats(
     query: Optional[str] = None,
@@ -217,7 +224,7 @@ def list_chats(
     )
     return chats
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Dict[str, Any]]:
     """Get WhatsApp chat metadata by JID.
@@ -229,7 +236,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Dict[
     chat = whatsapp_get_chat(chat_jid, include_last_message)
     return chat
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Dict[str, Any]]:
     """Get WhatsApp chat metadata by sender phone number.
@@ -240,7 +247,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Dict[str, A
     chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
     return chat
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
     """Get all WhatsApp chats involving the contact.
@@ -253,7 +260,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
     chats = whatsapp_get_contact_chats(jid, limit, page)
     return chats
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def get_last_interaction(jid: str) -> str:
     """Get most recent WhatsApp message involving the contact.
@@ -264,7 +271,7 @@ def get_last_interaction(jid: str) -> str:
     message = whatsapp_get_last_interaction(jid)
     return message
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def get_message_context(
     message_id: str,
@@ -293,7 +300,7 @@ def _with_mark_read(jid: str, success: bool, status_message: str, mark_read: boo
             result["mark_read_error"] = read_msg
     return result
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def send_message(recipient: str, message: str, mark_read: bool = False) -> Dict[str, Any]:
     """Send a WhatsApp text message to a person or group.
@@ -316,7 +323,7 @@ def send_message(recipient: str, message: str, mark_read: bool = False) -> Dict[
     success, status_message = whatsapp_send_message(jid, message)
     return _with_mark_read(jid, success, status_message, mark_read)
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def send_file(recipient: str, media_path: str, mark_read: bool = False) -> Dict[str, Any]:
     """Send a file (picture, video, document or raw audio) to a person or group.
@@ -336,7 +343,7 @@ def send_file(recipient: str, media_path: str, mark_read: bool = False) -> Dict[
     success, status_message = whatsapp_send_file(jid, media_path)
     return _with_mark_read(jid, success, status_message, mark_read)
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def send_audio_message(recipient: str, media_path: str, mark_read: bool = False) -> Dict[str, Any]:
     """Send an audio file as a WhatsApp voice message. If it fails because ffmpeg
@@ -357,7 +364,7 @@ def send_audio_message(recipient: str, media_path: str, mark_read: bool = False)
     success, status_message = whatsapp_audio_voice_message(jid, media_path)
     return _with_mark_read(jid, success, status_message, mark_read)
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
@@ -442,7 +449,7 @@ def _mark_many_read(chats: List[str], want_groups: bool) -> Dict[str, Any]:
     return {"success": done == len(results), "marked": done, "failed": len(results) - done, "results": results}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def mark_direct_chats_read(chats: List[str]) -> Dict[str, Any]:
     """Mark one or more direct (1:1) WhatsApp chats as read. The other person sees
@@ -461,7 +468,7 @@ def mark_direct_chats_read(chats: List[str]) -> Dict[str, Any]:
     return _mark_many_read(chats, want_groups=False)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def mark_group_chats_read(chats: List[str]) -> Dict[str, Any]:
     """Mark one or more WhatsApp groups or communities as read. Members may see your
@@ -479,7 +486,7 @@ def mark_group_chats_read(chats: List[str]) -> Dict[str, Any]:
     return _mark_many_read(chats, want_groups=True)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def mark_chat_unread(chat: str) -> Dict[str, Any]:
     """Mark a WhatsApp chat as unread on all your devices (a reminder to come back to it).
@@ -496,7 +503,6 @@ def mark_chat_unread(chat: str) -> Dict[str, Any]:
     return {"success": success, "message": message}
 
 
-_DESTRUCTIVE = ToolAnnotations(destructiveHint=True, readOnlyHint=False, idempotentHint=False)
 
 
 def _leave_groups(groups: List[str], delete_chat: bool) -> Dict[str, Any]:
@@ -513,7 +519,7 @@ def _leave_groups(groups: List[str], delete_chat: bool) -> Dict[str, Any]:
             results.append({"chat": entry, "success": False, "message": err})
             continue
         if not _is_group(jid):
-            results.append({"chat": entry, "success": False, "message": "Not a group; only groups can be left"})
+            results.append({"chat": entry, "success": False, "message": "Not a group or community; for a channel use unfollow_channels"})
             continue
         ok, msg = whatsapp_leave_group(jid, delete_chat)
         results.append({"chat": entry, "success": ok, "message": msg})
@@ -524,7 +530,9 @@ def _leave_groups(groups: List[str], delete_chat: bool) -> Dict[str, Any]:
 @mcp.tool(annotations=_DESTRUCTIVE)
 @needs_bridge
 def leave_groups(groups: List[str]) -> Dict[str, Any]:
-    """DESTRUCTIVE: exit one or more WhatsApp groups. Members see that you left, and
+    """DESTRUCTIVE: exit one or more WhatsApp groups or communities. Leaving a community
+    (its JID or its announcement group's JID) also leaves every group you are in inside it.
+    Members see that you left, and
     you can only rejoin with an invite link or if an admin re-adds you. The chat and
     its history stay in your list; use leave_and_delete_groups to remove them too.
 
@@ -543,7 +551,8 @@ def leave_groups(groups: List[str]) -> Dict[str, Any]:
 @mcp.tool(annotations=_DESTRUCTIVE)
 @needs_bridge
 def leave_and_delete_groups(groups: List[str]) -> Dict[str, Any]:
-    """DESTRUCTIVE AND IRREVERSIBLE: exit one or more WhatsApp groups and delete each
+    """DESTRUCTIVE AND IRREVERSIBLE: exit one or more WhatsApp groups or communities
+    (a community takes its groups with it) and delete each
     chat with its messages and media on all your devices. Members see that you left.
     Deleted history cannot be recovered.
 
@@ -559,7 +568,42 @@ def leave_and_delete_groups(groups: List[str]) -> Dict[str, Any]:
     return _leave_groups(groups, delete_chat=True)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
+@needs_bridge
+def list_channels() -> Dict[str, Any]:
+    """List the WhatsApp channels (newsletters) you follow, with name, JID
+    (…@newsletter), subscriber count and your role. Channels don't appear in list_chats."""
+    return whatsapp_list_channels()
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+@needs_bridge
+def unfollow_channels(channels: List[str]) -> Dict[str, Any]:
+    """DESTRUCTIVE: unfollow one or more WhatsApp channels. You can follow again later.
+
+    Args:
+        channels: One entry per channel as "Channel name (jid@newsletter)", using the exact
+            name and JID from list_channels. A name that does not match is refused.
+            Only include channels the user chose to unfollow.
+    """
+    known = {c["jid"]: c["name"] for c in whatsapp_list_channels().get("channels", [])}
+    results = []
+    for entry in dict.fromkeys(channels):
+        name, jid = _parse_chat_entry(entry or "")
+        if not jid or not jid.endswith("@newsletter"):
+            results.append({"channel": entry, "success": False, "message": 'Use "Channel name (jid@newsletter)" from list_channels'})
+        elif jid not in known:
+            results.append({"channel": entry, "success": False, "message": "You don't follow this channel"})
+        elif name.casefold() != known[jid].casefold():
+            results.append({"channel": entry, "success": False, "message": f"Name does not match (channel name: {known[jid]})"})
+        else:
+            ok, msg = whatsapp_unfollow_channel(jid)
+            results.append({"channel": entry, "success": ok, "message": msg})
+    done = sum(r["success"] for r in results)
+    return {"success": done == len(results), "done": done, "failed": len(results) - done, "results": results}
+
+
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def fetch_chat_history(chat_jid: str, count: int = 50) -> Dict[str, Any]:
     """Pull older messages for a chat from the user's phone, on demand.
@@ -578,7 +622,7 @@ def fetch_chat_history(chat_jid: str, count: int = 50) -> Dict[str, Any]:
     return whatsapp_fetch_history(chat_jid, count)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_READ)
 @needs_bridge
 def list_chat_lists(refresh: bool = False) -> Dict[str, Any]:
     """List the user's WhatsApp chat lists (the filters in the chat list, e.g. Favorites
@@ -591,7 +635,7 @@ def list_chat_lists(refresh: bool = False) -> Dict[str, Any]:
     return whatsapp_get_lists(refresh)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def create_chat_list(name: str) -> Dict[str, Any]:
     """Create a new custom WhatsApp chat list. Returns its list_id.
@@ -602,7 +646,7 @@ def create_chat_list(name: str) -> Dict[str, Any]:
     return whatsapp_create_list(name)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def update_chat_list(list_id: str, name: str = "", delete: bool = False) -> Dict[str, Any]:
     """Rename a custom chat list (pass name) or delete it (delete=True).
@@ -613,7 +657,7 @@ def update_chat_list(list_id: str, name: str = "", delete: bool = False) -> Dict
     return whatsapp_edit_list(list_id, name, delete)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_WRITE)
 @needs_bridge
 def set_chats_in_list(list_id: str, chat_jids: List[str], add: bool = True) -> Dict[str, Any]:
     """Add chats to a list (add=True) or remove them (add=False), in one batch.

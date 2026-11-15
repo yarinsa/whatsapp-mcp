@@ -773,6 +773,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	names.registerHandler()
 	readState.registerHandler()
 	readState.registerLeaveHandler()
+	readState.registerChannelHandlers()
 	readState.registerFetchHistoryHandler()
 	readState.registerListHandlers()
 
