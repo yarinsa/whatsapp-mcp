@@ -242,17 +242,7 @@ func (rs *ReadState) syncReadState(ctx context.Context, chat types.JID, read boo
 			k = proto.Clone(key).(*waCommon.MessageKey)
 			k.RemoteJID = proto.String(t.String())
 		}
-		err := rs.client.SendAppState(ctx, appstate.BuildMarkChatAsRead(t, read, ts, k))
-		if err != nil && appStateOutOfSync(err) {
-			// Our copy of this app-state collection no longer matches the
-			// server's: download it from scratch, then retry once.
-			rs.log.Warnf("App state regular_low out of sync (%v); resyncing", err)
-			if ferr := rs.client.FetchAppState(ctx, appstate.WAPatchRegularLow, true, false); ferr != nil {
-				rs.log.Errorf("Full app state resync failed: %v", ferr)
-			} else {
-				err = rs.client.SendAppState(ctx, appstate.BuildMarkChatAsRead(t, read, ts, k))
-			}
-		}
+		err := rs.sendAppStateRetry(ctx, appstate.BuildMarkChatAsRead(t, read, ts, k))
 		if err != nil {
 			if i == 0 {
 				return err

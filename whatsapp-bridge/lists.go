@@ -118,7 +118,7 @@ func (rs *ReadState) sendListEdit(ctx context.Context, id string, a *waSyncActio
 		Index: []string{appstate.IndexLabelEdit, id}, Version: 3,
 		Value: &waSyncAction.SyncActionValue{LabelEditAction: a},
 	}}}
-	if err := rs.client.SendAppState(ctx, patch); err != nil {
+	if err := rs.sendAppStateRetry(ctx, patch); err != nil {
 		return err
 	}
 	rs.saveList(id, a)
@@ -193,7 +193,7 @@ func (rs *ReadState) SetListChats(ctx context.Context, id string, chats []string
 	if len(muts) == 0 {
 		return 0, bad, nil
 	}
-	if err := rs.client.SendAppState(ctx, appstate.PatchInfo{Type: appstate.WAPatchRegular, Mutations: muts}); err != nil {
+	if err := rs.sendAppStateRetry(ctx, appstate.PatchInfo{Type: appstate.WAPatchRegular, Mutations: muts}); err != nil {
 		return 0, bad, err
 	}
 	for _, j := range jids {
@@ -260,4 +260,18 @@ func (rs *ReadState) registerListHandlers() {
 		n, bad, err := rs.SetListChats(r.Context(), req.ListID, req.ChatJIDs, req.Add)
 		writeJSON(w, err, map[string]any{"updated": n, "errors": bad})
 	})
+}
+
+// sendAppStateRetry sends an app-state patch; if our copy of that collection
+// has diverged from the server's, it downloads it from scratch and retries once.
+func (rs *ReadState) sendAppStateRetry(ctx context.Context, patch appstate.PatchInfo) error {
+	err := rs.client.SendAppState(ctx, patch)
+	if err == nil || !appStateOutOfSync(err) {
+		return err
+	}
+	rs.log.Warnf("App state %s out of sync (%v); resyncing", patch.Type, err)
+	if ferr := rs.client.FetchAppState(ctx, patch.Type, true, false); ferr != nil {
+		return fmt.Errorf("%w (resync also failed: %v)", err, ferr)
+	}
+	return rs.client.SendAppState(ctx, patch)
 }
