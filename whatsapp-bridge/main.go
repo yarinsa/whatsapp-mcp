@@ -1014,7 +1014,13 @@ func main() {
 		// and served at /api/pairing for the connector's login page. Codes
 		// rotate; when a batch runs out, start a new one until someone scans.
 		for paired := false; !paired; {
-			qrChan, _ := client.GetQRChannel(context.Background())
+			client.Disconnect() // a finished QR batch may leave the socket open
+			qrChan, err := client.GetQRChannel(context.Background())
+			if err != nil {
+				logger.Warnf("Can't start QR pairing yet: %v", err)
+				time.Sleep(3 * time.Second)
+				continue
+			}
 			if err := client.Connect(); err != nil {
 				logger.Errorf("Failed to connect: %v", err)
 				time.Sleep(5 * time.Second)
@@ -1032,7 +1038,6 @@ func main() {
 			}
 			setPairingCode("", 0)
 			if !paired {
-				client.Disconnect()
 				continue
 			}
 			// Only the owner's account may pair: anyone can open the login page.
