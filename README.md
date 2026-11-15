@@ -169,6 +169,10 @@ The bridge resolves WhatsApp LIDs to phone numbers and names using whatsmeow's L
 curl -s -X POST http://127.0.0.1:8765/api/resync-names
 ```
 
+### Read state
+
+The bridge keeps `unread_count` and `marked_unread` on each chat. Incoming messages raise the count. It goes back to zero when you reply, read the chat on another device, or mark it read through the MCP. Counts start at zero for chats that existed before this was added, except where a history sync reports them. `POST /api/mark-read` with `{"chat_jid": "...", "read": true|false}` does the marking.
+
 ## Architecture Overview
 
 This application consists of two main components:
@@ -194,7 +198,7 @@ Claude can access the following tools to interact with WhatsApp:
 - **bridge_status**: Check whether the bridge is running, connected, and when the last message synced
 - **search_contacts**: Search for people by name (Hebrew or English, saved or push name) or phone number; returns name, phone JID and LID
 - **list_messages**: Retrieve messages with optional filters and context
-- **list_chats**: List available chats with metadata
+- **list_chats**: List chats with name, JID, last message, `unread_count` and `marked_unread`; `unread_only=True` lists only unread chats
 - **get_chat**: Get information about a specific chat
 - **get_direct_chat_by_contact**: Find a direct chat with a specific contact
 - **get_contact_chats**: List all chats involving a specific contact
@@ -203,6 +207,8 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_message**: Send a WhatsApp message to a specified phone number or group JID
 - **send_file**: Send a file (image, video, raw audio, document) to a specified recipient
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
+- **mark_chat_read**: Mark a chat as read (sends read receipts and clears the unread badge on your phone)
+- **mark_chat_unread**: Mark a chat as unread on all your devices
 - **download_media**: Download media from a WhatsApp message and get the local file path
 
 ### Media Handling Features

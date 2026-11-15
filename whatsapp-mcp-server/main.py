@@ -12,7 +12,8 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
+    download_media as whatsapp_download_media,
+    mark_chat as whatsapp_mark_chat
 )
 
 import functools
@@ -101,7 +102,8 @@ def list_chats(
     limit: int = 20,
     page: int = 0,
     include_last_message: bool = True,
-    sort_by: str = "last_active"
+    sort_by: str = "last_active",
+    unread_only: bool = False
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp chats matching specified criteria.
     
@@ -111,13 +113,17 @@ def list_chats(
         page: Page number for pagination (default 0)
         include_last_message: Whether to include the last message in each chat (default True)
         sort_by: Field to sort results by, either "last_active" or "name" (default "last_active")
+        unread_only: Only return chats with unread messages or marked unread (default False)
+
+    Each chat includes unread_count and marked_unread.
     """
     chats = whatsapp_list_chats(
         query=query,
         limit=limit,
         page=page,
         include_last_message=include_last_message,
-        sort_by=sort_by
+        sort_by=sort_by,
+        unread_only=unread_only
     )
     return chats
 
@@ -280,6 +286,32 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "success": False,
             "message": "Failed to download media"
         }
+
+@mcp.tool()
+@needs_bridge
+def mark_chat_read(chat_jid: str) -> Dict[str, Any]:
+    """Mark a WhatsApp chat as read: sends read receipts (blue ticks) for its unread
+    incoming messages and clears the unread badge on your phone and other devices.
+
+    Args:
+        chat_jid: The JID of the chat (from list_chats), e.g. "123456789@lid" or "123@g.us"
+    """
+    success, message = whatsapp_mark_chat(chat_jid, read=True)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+@needs_bridge
+def mark_chat_unread(chat_jid: str) -> Dict[str, Any]:
+    """Mark a WhatsApp chat as unread on all your devices (a reminder to come back to it).
+    It does not undo read receipts already sent.
+
+    Args:
+        chat_jid: The JID of the chat (from list_chats)
+    """
+    success, message = whatsapp_mark_chat(chat_jid, read=False)
+    return {"success": success, "message": message}
+
 
 if __name__ == "__main__":
     status = probe_bridge()

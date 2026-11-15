@@ -33,6 +33,18 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def attach_read_state(conn: sqlite3.Connection, chats: list) -> None:
+    """Fill unread_count / marked_unread on Chat objects from the chats table."""
+    for chat in chats:
+        if chat is None:
+            continue
+        row = conn.execute(
+            "SELECT unread_count, marked_unread FROM chats WHERE jid = ?", (chat.jid,)
+        ).fetchone()
+        if row:
+            chat.unread_count, chat.marked_unread = row[0] or 0, bool(row[1])
+
+
 def user_part(jid: Optional[str]) -> str:
     return (jid or "").split("@")[0].split(":")[0]
 
@@ -57,6 +69,8 @@ class Chat:
     last_sender: Optional[str] = None
     last_is_from_me: Optional[bool] = None
     last_sender_name: Optional[str] = None
+    unread_count: int = 0
+    marked_unread: bool = False
 
     @property
     def is_group(self) -> bool:
@@ -331,7 +345,8 @@ def list_chats(
     limit: int = 20,
     page: int = 0,
     include_last_message: bool = True,
-    sort_by: str = "last_active"
+    sort_by: str = "last_active",
+    unread_only: bool = False
 ) -> List[Chat]:
     """Get chats matching the specified criteria."""
     try:
@@ -352,8 +367,9 @@ def list_chats(
         
         if include_last_message:
             query_parts.append("""
-                LEFT JOIN messages ON chats.jid = messages.chat_jid 
-                AND chats.last_message_time = messages.timestamp
+                LEFT JOIN messages ON messages.rowid = (
+                    SELECT rowid FROM messages lm WHERE lm.chat_jid = chats.jid
+                    ORDER BY julianday(lm.timestamp) DESC LIMIT 1)
             """)
             
         where_clauses = []
@@ -362,6 +378,9 @@ def list_chats(
         if query:
             where_clauses.append("(norm(chats.name) LIKE ? OR chats.jid LIKE ?)")
             params.extend([f"%{normalize_name(query)}%", f"%{query}%"])
+
+        if unread_only:
+            where_clauses.append("(chats.unread_count > 0 OR chats.marked_unread)")
             
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
@@ -391,7 +410,8 @@ def list_chats(
             if chat.last_sender and not chat.last_is_from_me:
                 chat.last_sender_name = get_sender_name(chat.last_sender)
             result.append(chat)
-            
+
+        attach_read_state(conn, result)
         return result
         
     except sqlite3.Error as e:
@@ -573,8 +593,9 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
         
         if include_last_message:
             query += """
-                LEFT JOIN messages m ON c.jid = m.chat_jid 
-                AND c.last_message_time = m.timestamp
+                LEFT JOIN messages m ON m.rowid = (
+                SELECT rowid FROM messages lm WHERE lm.chat_jid = c.jid
+                ORDER BY julianday(lm.timestamp) DESC LIMIT 1)
             """
             
         query += " WHERE c.jid = ?"
@@ -585,7 +606,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
         if not chat_data:
             return None
             
-        return Chat(
+        chat = Chat(
             jid=chat_data[0],
             name=chat_data[1],
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
@@ -593,6 +614,8 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5]
         )
+        attach_read_state(conn, [chat])
+        return chat
         
     except sqlite3.Error as e:
         print(f"Database error: {e}")
@@ -617,8 +640,9 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
                 m.sender as last_sender,
                 m.is_from_me as last_is_from_me
             FROM chats c
-            LEFT JOIN messages m ON c.jid = m.chat_jid 
-                AND c.last_message_time = m.timestamp
+            LEFT JOIN messages m ON m.rowid = (
+                SELECT rowid FROM messages lm WHERE lm.chat_jid = c.jid
+                ORDER BY julianday(lm.timestamp) DESC LIMIT 1)
             WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us'
             LIMIT 1
         """, (f"%{sender_phone_number}%",))
@@ -628,7 +652,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         if not chat_data:
             return None
             
-        return Chat(
+        chat = Chat(
             jid=chat_data[0],
             name=chat_data[1],
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
@@ -636,6 +660,8 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5]
         )
+        attach_read_state(conn, [chat])
+        return chat
         
     except sqlite3.Error as e:
         print(f"Database error: {e}")
@@ -787,3 +813,17 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return None
+
+
+def mark_chat(chat_jid: str, read: bool = True) -> Tuple[bool, str]:
+    """Mark a chat read (sending read receipts) or unread via the bridge."""
+    try:
+        resp = requests.post(f"{WHATSAPP_API_BASE_URL}/mark-read",
+                             json={"chat_jid": chat_jid, "read": read}, timeout=30)
+        try:
+            data = resp.json()
+        except ValueError:
+            return False, f"Bridge returned HTTP {resp.status_code}: {resp.text[:200]}"
+        return bool(data.get("success")), data.get("message", "")
+    except requests.RequestException as e:
+        return False, f"Request error: {e}"

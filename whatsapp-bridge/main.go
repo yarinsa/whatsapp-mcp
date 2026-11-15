@@ -31,6 +31,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// readState tracks unread counts and marks chats read (see readstate.go).
+var readState *ReadState
+
 // names resolves JIDs to contact and group names (see names.go).
 var names *NameResolver
 
@@ -93,6 +96,10 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
 
+	if err := migrateReadState(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate read-state schema: %v", err)
+	}
 	if err := migrateNames(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to migrate name schema: %v", err)
@@ -111,7 +118,10 @@ func (store *MessageStore) StoreChat(jid, name, nameSource string, lastMessageTi
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, name, name_source, last_message_time) VALUES (?, ?, ?, ?)
 		ON CONFLICT(jid) DO UPDATE SET
-			last_message_time = excluded.last_message_time,
+			last_message_time = CASE
+				WHEN chats.last_message_time IS NULL
+				  OR julianday(excluded.last_message_time) > julianday(chats.last_message_time)
+				THEN excluded.last_message_time ELSE chats.last_message_time END,
 			name = CASE WHEN excluded.name_source = 'fallback' AND COALESCE(chats.name_source, 'fallback') != 'fallback'
 			            THEN chats.name ELSE excluded.name END,
 			name_source = CASE WHEN excluded.name_source = 'fallback' AND COALESCE(chats.name_source, 'fallback') != 'fallback'
@@ -217,7 +227,7 @@ type SendMessageRequest struct {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -376,13 +386,55 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err)
 	}
 
+	// WhatsApp doesn't echo our own sends back to this device, so store it now.
+	storeSentMessage(client, messageStore, recipientJID, resp, msg)
+
 	return true, fmt.Sprintf("Message sent to %s", recipient)
+}
+
+// storeSentMessage records a message we sent in the chat it belongs to. A DM
+// to a phone number lands in the contact's LID chat when that's the one in use.
+func storeSentMessage(client *whatsmeow.Client, messageStore *MessageStore, to types.JID, resp whatsmeow.SendResponse, msg *waProto.Message) {
+	ctx := context.Background()
+	chat := to.ToNonAD()
+	if chat.Server == types.DefaultUserServer {
+		if lid, err := client.Store.LIDs.GetLIDForPN(ctx, chat); err == nil && !lid.IsEmpty() {
+			var lidTime, pnTime sql.NullString
+			messageStore.db.QueryRow(`SELECT last_message_time FROM chats WHERE jid = ?`, lid.String()).Scan(&lidTime)
+			messageStore.db.QueryRow(`SELECT last_message_time FROM chats WHERE jid = ?`, chat.String()).Scan(&pnTime)
+			if lidTime.Valid && (!pnTime.Valid || lidTime.String > pnTime.String) {
+				chat = lid
+			}
+		}
+	}
+	ts := resp.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	content := extractTextContent(msg)
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg)
+	name, source := names.ChatName(ctx, chat, "")
+	if err := messageStore.StoreChat(chat.String(), name, source, ts); err != nil {
+		fmt.Printf("Failed to store chat for sent message: %v\n", err)
+		return
+	}
+	self := ""
+	if client.Store.ID != nil {
+		self = client.Store.ID.User
+	}
+	if err := messageStore.StoreMessage(resp.ID, chat.String(), self, content, ts, true,
+		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength); err != nil {
+		fmt.Printf("Failed to store sent message: %v\n", err)
+		return
+	}
+	health.Touch(ts)
+	readState.OnStoredMessage(chat.String(), true)
 }
 
 // Extract media info from a message
@@ -429,6 +481,16 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
 
+	// Reactions, receipts-as-messages and protocol messages have no content;
+	// don't let them touch the chat's last message time.
+	if extractTextContent(msg.Message) == "" {
+		if mt, _, _, _, _, _, _ := extractMediaInfo(msg.Message); mt == "" {
+			return
+		}
+	}
+	var seen int
+	messageStore.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id = ? AND chat_jid = ?`, msg.Info.ID, chatJID).Scan(&seen)
+
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
 	name, nameSource := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
 
@@ -469,6 +531,9 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
 	} else {
+		if seen == 0 {
+			readState.OnStoredMessage(chatJID, msg.Info.IsFromMe)
+		}
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"
@@ -705,6 +770,7 @@ func bridgePort() int {
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	registerHealthHandler(client)
 	names.registerHandler()
+	readState.registerHandler()
 
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
@@ -735,7 +801,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -874,15 +940,19 @@ func main() {
 		}
 	}
 
+	names = NewNameResolver(client, messageStore.db, logger)
+	readState = &ReadState{client: client, db: messageStore.db, log: logger}
+	repairLastMessageTimes(messageStore.db, logger)
+
 	// Serve /api/health before connecting so a stuck connect is visible.
 	startRESTServer(client, messageStore, bridgePort())
 	go runWatchdog()
 
-	names = NewNameResolver(client, messageStore.db, logger)
 
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
 		names.HandleEvent(evt)
+		readState.HandleEvent(evt)
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
@@ -1036,6 +1106,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			}
 
 			messageStore.StoreChat(chatJID, name, nameSource, timestamp)
+			readState.ApplyHistory(chatJID, conversation.GetUnreadCount(), conversation.GetMarkedAsUnread())
 
 			// Store messages
 			for _, msg := range messages {
