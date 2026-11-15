@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -15,14 +15,40 @@ from whatsapp import (
     download_media as whatsapp_download_media,
     mark_chat as whatsapp_mark_chat
 )
+from search import search_messages as whatsapp_search_messages
 
 import functools
+import os
 import sys
 
 from bridge import bridge_status as probe_bridge, require_bridge
 
-# Initialize FastMCP server
-mcp = FastMCP("whatsapp")
+# MCP_TRANSPORT=streamable-http serves the tools over HTTPS behind OAuth (for
+# remote use from claude.ai / the Claude iPhone app); the default stays stdio.
+TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio")
+
+if TRANSPORT == "streamable-http":
+    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+    from auth import SCOPE, WhatsAppOAuthProvider
+
+    PUBLIC_URL = os.environ["PUBLIC_URL"].rstrip("/")  # e.g. https://whatsapp-mcp.up.railway.app
+    oauth = WhatsAppOAuthProvider(PUBLIC_URL, os.environ["WHATSAPP_OWNER_PHONE"])
+    mcp = MCPServer(
+        "whatsapp",
+        auth_server_provider=oauth,
+        auth=AuthSettings(
+            issuer_url=PUBLIC_URL,
+            resource_server_url=f"{PUBLIC_URL}/mcp",
+            client_registration_options=ClientRegistrationOptions(
+                enabled=True, valid_scopes=[SCOPE], default_scopes=[SCOPE]
+            ),
+            revocation_options=RevocationOptions(enabled=True),
+            required_scopes=[SCOPE],
+        ),
+    )
+    mcp.custom_route("/login", methods=["GET", "POST"])(oauth.login_page)
+else:
+    mcp = MCPServer("whatsapp")
 
 
 def needs_bridge(fn):
@@ -45,10 +71,12 @@ def bridge_status() -> Dict[str, Any]:
 @mcp.tool()
 @needs_bridge
 def search_contacts(query: str) -> List[Dict[str, Any]]:
-    """Search WhatsApp contacts by name or phone number.
-    
+    """Search WhatsApp contacts and groups by name (Hebrew or English) or phone number.
+
+    Groups come last, with is_group=true and their group JID.
+
     Args:
-        query: Search term to match against contact names or phone numbers
+        query: Search term to match against contact/group names or phone numbers
     """
     contacts = whatsapp_search_contacts(query)
     return contacts
@@ -63,21 +91,23 @@ def list_messages(
     query: Optional[str] = None,
     limit: int = 20,
     page: int = 0,
-    include_context: bool = True,
+    include_context: Optional[bool] = None,
     context_before: int = 1,
     context_after: int = 1
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp messages matching specified criteria with optional context.
+
+    For keyword search prefer search_messages (indexed, compact output).
     
     Args:
         after: Optional ISO-8601 formatted string to only return messages after this date
         before: Optional ISO-8601 formatted string to only return messages before this date
-        sender_phone_number: Optional phone number to filter messages by sender
+        sender_phone_number: Optional sender: phone, LID, JID or name; matches all of the person's identities
         chat_jid: Optional chat JID to filter messages by chat
-        query: Optional search term to filter messages by content
+        query: Optional search words; all must appear (any order)
         limit: Maximum number of messages to return (default 20)
         page: Page number for pagination (default 0)
-        include_context: Whether to include messages before and after matches (default True)
+        include_context: Include messages around each match (default: only when query is given)
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
     """
@@ -94,6 +124,40 @@ def list_messages(
         context_after=context_after
     )
     return messages
+
+@mcp.tool()
+@needs_bridge
+def search_messages(
+    query: Optional[str] = None,
+    chat_jid: Optional[str] = None,
+    sender: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    from_me: Optional[bool] = None,
+    media_type: Optional[str] = None,
+    sort: str = "recent",
+    limit: int = 30,
+    page: int = 0,
+) -> str:
+    """Full-text search across all WhatsApp messages (indexed, Hebrew and English).
+
+    Every word must appear, in any order, as a substring (so Hebrew prefixes
+    like ו/ה/ב/ל still match). Returns one line per hit: date, chat, sender,
+    snippet, and the message id + chat JID for get_message_context.
+
+    Args:
+        query: Words to find; optional if a filter is given
+        chat_jid: Limit to one chat
+        sender: Person by name, phone, LID or JID (all their identities match)
+        after: ISO date/time, inclusive
+        before: ISO date/time, exclusive
+        from_me: True for only my messages, False for only others'
+        media_type: image, video, audio or document
+        sort: "recent" (default) or "relevance"
+        limit: Max results (default 30)
+        page: Page number
+    """
+    return whatsapp_search_messages(query, chat_jid, sender, after, before, from_me, media_type, sort, limit, page)
 
 @mcp.tool()
 @needs_bridge
@@ -179,16 +243,18 @@ def get_last_interaction(jid: str) -> str:
 def get_message_context(
     message_id: str,
     before: int = 5,
-    after: int = 5
+    after: int = 5,
+    chat_jid: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Get context around a specific WhatsApp message.
-    
+
     Args:
         message_id: The ID of the message to get context for
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
+        chat_jid: Chat the message is in (recommended: IDs are only unique per chat)
     """
-    context = whatsapp_get_message_context(message_id, before, after)
+    context = whatsapp_get_message_context(message_id, before, after, chat_jid)
     return context
 
 @mcp.tool()
@@ -316,4 +382,15 @@ def mark_chat_unread(chat_jid: str) -> Dict[str, Any]:
 if __name__ == "__main__":
     status = probe_bridge()
     print(f"[whatsapp-mcp] bridge check: {status['summary']}", file=sys.stderr)
-    mcp.run(transport='stdio')
+    if TRANSPORT == "streamable-http":
+        from urllib.parse import urlparse
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        mcp.run(
+            transport="streamable-http",
+            host="0.0.0.0",
+            port=int(os.environ.get("PORT", "8000")),
+            transport_security=TransportSecuritySettings(allowed_hosts=[urlparse(PUBLIC_URL).netloc]),
+        )
+    else:
+        mcp.run(transport="stdio")

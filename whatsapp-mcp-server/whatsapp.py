@@ -9,7 +9,10 @@ import re
 import unicodedata
 import audio
 
-MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
+MESSAGES_DB_PATH = os.path.join(
+    os.environ.get('WHATSAPP_STORE_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store')),
+    'messages.db',
+)
 from bridge import API_BASE_URL as WHATSAPP_API_BASE_URL
 
 _IGNORABLE = re.compile(r"[\u0591-\u05C7\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]")
@@ -85,6 +88,7 @@ class Contact:
     lid: Optional[str] = None
     push_name: Optional[str] = None
     name_source: Optional[str] = None
+    is_group: bool = False
 
 @dataclass
 class MessageContext:
@@ -153,7 +157,7 @@ def list_messages(
     query: Optional[str] = None,
     limit: int = 20,
     page: int = 0,
-    include_context: bool = True,
+    include_context: Optional[bool] = None,
     context_before: int = 1,
     context_after: int = 1
 ) -> List[Message]:
@@ -175,8 +179,8 @@ def list_messages(
             except ValueError:
                 raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
             
-            where_clauses.append("messages.timestamp > ?")
-            params.append(after)
+            where_clauses.append("julianday(messages.timestamp) > julianday(?)")
+            params.append(after.isoformat())
 
         if before:
             try:
@@ -184,27 +188,28 @@ def list_messages(
             except ValueError:
                 raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
             
-            where_clauses.append("messages.timestamp < ?")
-            params.append(before)
+            where_clauses.append("julianday(messages.timestamp) < julianday(?)")
+            params.append(before.isoformat())
 
         if sender_phone_number:
-            where_clauses.append("messages.sender = ?")
-            params.append(sender_phone_number)
+            from search import sender_clause
+            where_clauses.append(sender_clause(conn, sender_phone_number, params).replace("m.sender", "messages.sender"))
             
         if chat_jid:
             where_clauses.append("messages.chat_jid = ?")
             params.append(chat_jid)
             
         if query:
-            where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
-            params.append(f"%{query}%")
+            for word in query.split():
+                where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
+                params.append(f"%{word}%")
             
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
             
         # Add pagination
         offset = page * limit
-        query_parts.append("ORDER BY messages.timestamp DESC")
+        query_parts.append("ORDER BY julianday(messages.timestamp) DESC")
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit, offset])
         
@@ -225,11 +230,13 @@ def list_messages(
             )
             result.append(message)
             
+        if include_context is None:
+            include_context = bool(query)
         if include_context and result:
             # Add context for each message
             messages_with_context = []
             for msg in result:
-                context = get_message_context(msg.id, context_before, context_after)
+                context = get_message_context(msg.id, context_before, context_after, msg.chat_jid)
                 messages_with_context.extend(context.before)
                 messages_with_context.append(context.message)
                 messages_with_context.extend(context.after)
@@ -250,7 +257,8 @@ def list_messages(
 def get_message_context(
     message_id: str,
     before: int = 5,
-    after: int = 5
+    after: int = 5,
+    chat_jid: Optional[str] = None,
 ) -> MessageContext:
     """Get context around a specific message."""
     try:
@@ -262,12 +270,13 @@ def get_message_context(
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.id = ?
-        """, (message_id,))
+            WHERE messages.id = ? AND (? IS NULL OR messages.chat_jid = ?)
+            ORDER BY julianday(messages.timestamp) DESC LIMIT 1
+        """, (message_id, chat_jid, chat_jid))
         msg_data = cursor.fetchone()
         
         if not msg_data:
-            raise ValueError(f"Message with ID {message_id} not found")
+            raise ValueError(f"Message with ID {message_id} not found" + (f" in {chat_jid}" if chat_jid else ""))
             
         target_message = Message(
             timestamp=datetime.fromisoformat(msg_data[0]),
@@ -285,8 +294,8 @@ def get_message_context(
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp < ?
-            ORDER BY messages.timestamp DESC
+            WHERE messages.chat_jid = ? AND julianday(messages.timestamp) < julianday(?)
+            ORDER BY julianday(messages.timestamp) DESC
             LIMIT ?
         """, (msg_data[7], msg_data[0], before))
         
@@ -308,8 +317,8 @@ def get_message_context(
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
-            WHERE messages.chat_jid = ? AND messages.timestamp > ?
-            ORDER BY messages.timestamp ASC
+            WHERE messages.chat_jid = ? AND julianday(messages.timestamp) > julianday(?)
+            ORDER BY julianday(messages.timestamp) ASC
             LIMIT ?
         """, (msg_data[7], msg_data[0], after))
         
@@ -464,7 +473,14 @@ def search_contacts(query: str) -> List[Contact]:
                     push_name=push,
                     name_source=source,
                 ))
-        return [c for _, c in sorted(people.values(), key=lambda x: x[0])[:50]]
+        found = [c for _, c in sorted(people.values(), key=lambda x: x[0])[:50]]
+        groups = conn.execute(
+            """SELECT jid, name FROM chats WHERE jid LIKE '%@g.us' AND norm(name) LIKE ?
+               ORDER BY julianday(last_message_time) DESC LIMIT 20""",
+            (f"%{q}%",),
+        ).fetchall()
+        found += [Contact(phone_number="", name=n, jid=j, name_source="group", is_group=True) for j, n in groups]
+        return found
 
     except sqlite3.Error as e:
         print(f"Database error: {e}")
