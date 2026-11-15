@@ -411,7 +411,8 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 
 // Handle regular incoming messages with media support
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
-	// Save message to database
+	health.Touch(msg.Info.Timestamp)
+
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
 
@@ -689,6 +690,8 @@ func bridgePort() int {
 
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+	registerHealthHandler(client)
+
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -794,6 +797,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	go func() {
 		if err := http.ListenAndServe(serverAddr, nil); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
+			os.Exit(3)
 		}
 	}()
 }
@@ -846,6 +850,20 @@ func main() {
 	}
 	defer messageStore.Close()
 
+	var newest string
+	if err := messageStore.db.QueryRow("SELECT MAX(timestamp) FROM messages").Scan(&newest); err == nil && newest != "" {
+		for _, layout := range []string{"2006-01-02 15:04:05-07:00", "2006-01-02 15:04:05.999999999-07:00", time.RFC3339Nano} {
+			if t, err := time.Parse(layout, newest); err == nil {
+				health.SeedLastMessage(t)
+				break
+			}
+		}
+	}
+
+	// Serve /api/health before connecting so a stuck connect is visible.
+	startRESTServer(client, messageStore, bridgePort())
+	go runWatchdog()
+
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
@@ -858,9 +876,19 @@ func main() {
 			handleHistorySync(client, messageStore, v, logger)
 
 		case *events.Connected:
+			health.SetConnected()
 			logger.Infof("Connected to WhatsApp")
 
+		case *events.Disconnected:
+			health.SetDisconnected(false)
+			logger.Warnf("Disconnected from WhatsApp")
+
+		case *events.StreamReplaced:
+			health.SetDisconnected(false)
+			logger.Warnf("Stream replaced by another client")
+
 		case *events.LoggedOut:
+			health.SetDisconnected(true)
 			logger.Warnf("Device logged out, please scan QR code to log in again")
 		}
 	})
@@ -917,8 +945,6 @@ func main() {
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
-	// Start REST API server
-	startRESTServer(client, messageStore, bridgePort())
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
@@ -1020,6 +1046,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 // Handle history sync events
 func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, historySync *events.HistorySync, logger waLog.Logger) {
 	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
+	health.Touch(time.Time{})
 
 	syncedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
@@ -1124,6 +1151,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					continue
 				}
 
+				health.Touch(timestamp)
 				err = messageStore.StoreMessage(
 					msgID,
 					chatJID,
